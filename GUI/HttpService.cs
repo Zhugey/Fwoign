@@ -74,6 +74,9 @@ namespace Fwoign
 
         // ===== 启停 =====
 
+        /// <summary>本次镜像的分区数（单播时用；多播由发送端提供）。0 = 未知。</summary>
+        public int ImagePartCount;
+
         public void Start(string imagesDir, string bootDir, string imageName, int port)
         {
             ImagesDir = imagesDir;
@@ -198,9 +201,11 @@ namespace Fwoign
             bool salvaged = false;
             foreach (ClientState c in pending)
             {
-                // 备份：目录里已经没有 .000 残留，说明数据写完了，直接收尾——
-                // 不用等 FOS 那个可能跑很久的 chmod 和回调。
-                if (TrySalvageCapture(c)) { changed = true; salvaged = true; continue; }
+                // 备份：目录里已经没有 .000 残留，说明数据写完了，可以收尾。
+                // 但要等得更久一些（30 秒）：客户端在收尾阶段还会对镜像目录做 chmod，
+                // 抢在它前面重命名会"访问被拒绝"，也会让它后面的回调落空。
+                if ((DateTime.Now - c.Updated).TotalSeconds >= 30 && TrySalvageCapture(c))
+                { changed = true; salvaged = true; continue; }
 
                 // 注意：标记状态时不更新 Updated，否则超时计时会一直重置，永远判不了死。
                 double idle = (DateTime.Now - c.Updated).TotalSeconds;
@@ -237,7 +242,7 @@ namespace Fwoign
                         {
                             c.State = "已完成";
                             c.Result = "多播还原完成";
-                            c.Percent = 100;
+                            NormalizeCompleted(c);
                         }
                         else
                         {
@@ -330,26 +335,48 @@ namespace Fwoign
             string dir = Path.Combine(ImagesDir, name);
             if (!LooksComplete(dir)) return false;
 
-            string dst = Path.Combine(ImagesDir, ImageName);
-            try
+            // 数据写完（没有 .000 残留）但没等到回调：只标状态，
+            // 目录留到点「停止」时统一重命名（见 FinalizePendingCaptures）。
+            lock (_gate)
             {
-                if (Directory.Exists(dst)) Directory.Delete(dst, true);
-                Directory.Move(dir, dst);
-
-                lock (_gate)
-                {
-                    c.State = "已完成";
-                    c.Result = "成功（客户端未发回调，按目录完整性判定）";
-                    c.Percent = 100;
-                    c.Updated = DateTime.Now;
-                }
-                ReportLog("备份数据完整，已保存为镜像 " + ImageName + "（客户端未发回调）");
-                return true;
+                if (IsTerminal(c.State)) return true;
+                c.State = "已完成";
+                c.Result = "成功（客户端未发回调，按目录完整性判定；停止服务时归档）";
+                NormalizeCompleted(c);
             }
-            catch (Exception ex)
+            ReportLog(string.Format("备份数据已完整（{0}），停止服务时会归档为镜像 {1}", name, ImageName));
+            return true;
+        }
+
+        /// <summary>
+        /// 停止服务时调用：把本次备份产生的 MAC 目录归档为正式镜像名。
+        /// 放在这里而不是回调里，是因为重命名与 FOS 无关，
+        /// 而且此时服务已停、客户端已断开，不会再出现目录占用。
+        /// </summary>
+        public void FinalizePendingCaptures()
+        {
+            if (!string.Equals(TaskType, "up", StringComparison.OrdinalIgnoreCase)) return;
+            if (string.IsNullOrEmpty(ImageName)) return;
+
+            string dst = Path.Combine(ImagesDir, ImageName);
+            foreach (ClientState c in Snapshot())
             {
-                ReportLog("抢救备份目录失败：" + ex.Message);
-                return false;
+                string mac = (c.Mac ?? "").Replace(":", "").Replace("-", "").ToLowerInvariant();
+                if (mac.Length != 12) continue;
+
+                string src = Path.Combine(ImagesDir, mac);
+                if (!Directory.Exists(src) || !LooksComplete(src)) continue;
+
+                try
+                {
+                    if (Directory.Exists(dst)) Directory.Delete(dst, true);
+                    Directory.Move(src, dst);
+                    ReportLog(string.Format("已归档备份镜像：{0}（来自 {1}）", ImageName, mac));
+                }
+                catch (Exception ex)
+                {
+                    ReportLog(string.Format("归档备份镜像失败（{0}）：{1}", mac, ex.Message));
+                }
             }
         }
 
@@ -440,7 +467,8 @@ namespace Fwoign
             if (!any || !allDone) return;
 
             _completedRaised = true;
-            ReportLog("客户端任务全部结束（" + reason + "），自动停止服务");
+            // 只报告，不停服务：停服务会导致仍在收尾的客户端卡死
+            ReportLog("客户端任务全部结束（" + reason + "），服务保持运行，等待手动停止");
             RaiseCompleted(reason);
         }
 
@@ -730,8 +758,9 @@ namespace Fwoign
 
             if (path.EndsWith("/Post_Stage2.php", StringComparison.OrdinalIgnoreCase))
             {
-                FinalizeCapture(mac);
-                RecordClient(clientIp, mac, "已完成", "成功", true);
+                // 只标记完成，不重命名：重命名是我们自己的事，改到点「停止」时统一做，
+                // 避免和客户端收尾阶段的 chmod / 目录占用互相打架。
+                RecordClient(clientIp, mac, "已完成", "成功（停止服务时归档为镜像）", true);
                 SendText(ns, "##");
                 CheckAllDone("备份收尾回调");
                 return;
@@ -795,6 +824,28 @@ namespace Fwoign
             return c;
         }
 
+        /// <summary>
+        /// 客户端已判定完成时统一收口：进度一律 100%，大小显示为「总量/总量」。
+        /// 避免出现「100% 但 16.3/17.1GB」这种自相矛盾的显示
+        /// （partclone 的块计数与字节计数不同步，最后一小段常常对不上）。
+        /// </summary>
+        private static void NormalizeCompleted(ClientState c)
+        {
+            c.Percent = 100;
+            string p = c.Progress ?? "";
+            int slash = p.LastIndexOf('/');
+            if (slash <= 0) return;
+
+            string totalText = p.Substring(slash + 1).Trim();   // 例如 "17.1GB"
+            if (totalText.Length == 0) return;
+
+            int cut = p.LastIndexOf(' ', slash);                 // "分区 2/3 · 13.7/17.1GB" 里的空格
+            if (cut < 0) cut = p.LastIndexOf('·', slash);
+            string prefix = cut >= 0 ? p.Substring(0, cut + 1) : "";
+
+            c.Progress = prefix + totalText + "/" + totalText;
+        }
+
         private void RecordClient(string ip, string mac, string state, string result, bool notify)
         {
             bool isNew = false;
@@ -814,9 +865,9 @@ namespace Fwoign
                 if (c.State != state) stateChanged = true;
                 c.State = state;
                 if (result != null) c.Result = result;
-                // 收尾回调到达就说明数据已经写完，把进度补满
+                // 收尾回调到达就说明数据已经写完，把进度补满并统一大小显示
                 //（FOS 在 partclone 结束后就停掉进度上报，最后几个百分点不会再报上来）
-                if (state == "已完成") c.Percent = 100;
+                if (state == "已完成") NormalizeCompleted(c);
                 c.Updated = DateTime.Now;
             }
 
@@ -840,7 +891,15 @@ namespace Fwoign
 
             // bpm@elapsed@remaining@copied@total@percent@totalsize
             double pct = 0;
-            double.TryParse(p[5], NumberStyles.Float, CultureInfo.InvariantCulture, out pct);
+
+            // 用「已拷贝字节 / 总量」算百分比，而不是直接用客户端上报的 percent：
+            // partclone 的 percent 按块计数，常在 16.3/17.1GB 时就报 100%，看起来自相矛盾。
+            double copiedBytes = ToBytes(p[3]);
+            double totalBytes = ToBytes(p[4]);
+            if (totalBytes > 0 && copiedBytes >= 0)
+                pct = Math.Min(100.0, copiedBytes * 100.0 / totalBytes);
+            else
+                double.TryParse(p[5], NumberStyles.Float, CultureInfo.InvariantCulture, out pct);
 
             bool multiPart = false;
             int partNo = 0, partTotal = 0;
@@ -854,41 +913,27 @@ namespace Fwoign
                 c.Remaining = p[2];
                 c.Progress = FormatPair(p[3], p[4]);
 
-                // 客户端上报的是「当前分区」的百分比。多分区镜像（尤其 Windows 的
-                // ESP/MSR/系统三个分区）会让进度条反复 0→100%，看起来像跑了三遍。
-                // 这里把它换算成整任务进度：已完成分区的字节 + 当前分区的部分。
+                // 客户端上报的是「当前分区」的百分比，每个分区都会 0→100%。
+                // 进度条因此按「每个分区 0-100%」显示，同时在进度列标出分区序号，
+                // 避免 Windows 三分区时看起来反复归零又跑满。
                 long[] sizes = null;
                 MulticastSession mc = Multicast;
                 if (mc != null) sizes = mc.PartitionSizes;
 
-                if (sizes != null && sizes.Length > 1)
+                int totalParts = (sizes != null ? sizes.Length : ImagePartCount);
+                if (totalParts > 1)
                 {
-                    int n = sizes.Length;
-                    // 百分比大幅回退 = 客户端已切到下一个分区
-                    if (pct + 15.0 < c.LastRawPct && c.PartIdx < n - 1) c.PartIdx++;
-                    c.LastRawPct = pct;
+                    if (pct + 15.0 < c.LastRawPct && c.PartIdx < totalParts - 1) c.PartIdx++;
                     if (c.PartIdx < 0) c.PartIdx = 0;
-
-                    long totalAll = 0, before = 0;
-                    for (int i = 0; i < n; i++)
-                    {
-                        totalAll += sizes[i];
-                        if (i < c.PartIdx) before += sizes[i];
-                    }
-                    if (totalAll > 0)
-                        c.Percent = (before + pct / 100.0 * sizes[c.PartIdx]) * 100.0 / totalAll;
-
-                    multiPart = true;
-                    partNo = c.PartIdx + 1;
-                    partTotal = n;
                 }
-                else
-                {
-                    c.Percent = pct;
-                }
+                c.LastRawPct = pct;
+                c.Percent = pct;                 // 当前分区进度，0-100%
 
+                multiPart = totalParts > 1;
+                partNo = c.PartIdx + 1;
+                partTotal = totalParts;
                 if (multiPart)
-                    c.Progress = string.Format("{0} · 分区 {1}/{2}", c.Progress, partNo, partTotal);
+                    c.Progress = string.Format("分区 {0}/{1} · {2}", partNo, partTotal, c.Progress);
                 c.Updated = DateTime.Now;
             }
             RaiseClients();
@@ -927,30 +972,6 @@ namespace Fwoign
                 case "TIB":
                 case "TB": return v * 1024.0 * 1024 * 1024 * 1024;
                 default: return v;
-            }
-        }
-
-        /// <summary>备份收尾：把 MAC 目录改成镜像名（Post_Stage2 触发）。</summary>
-        private void FinalizeCapture(string mac)
-        {
-            string macDir = (mac ?? "").Replace(":", "").Replace("-", "").ToLowerInvariant();
-            if (macDir.Length == 0) return;
-            string src = Path.Combine(ImagesDir, macDir);
-            string dst = Path.Combine(ImagesDir, ImageName);
-            try
-            {
-                if (!Directory.Exists(src))
-                {
-                    ReportLog("收尾提示：未找到 " + src + "（可能已重命名过）");
-                    return;
-                }
-                if (Directory.Exists(dst)) Directory.Delete(dst, true);
-                Directory.Move(src, dst);
-                ReportLog("备份已保存为镜像 " + ImageName);
-            }
-            catch (Exception ex)
-            {
-                ReportLog("备份重命名失败：" + ex.Message);
             }
         }
 
@@ -1000,32 +1021,26 @@ namespace Fwoign
 
                         if (prev == total)
                         {
-                            string dst = Path.Combine(ImagesDir, ImageName);
-                            try
+                            // 目录大小连续两次不变 = 数据写完。
+                            // 这里只标状态，不做重命名：重命名统一放到「停止服务」时做，
+                            // 否则会在客户端还没收尾时就改掉目录名（实测就是这样）。
+                            lock (_gate)
                             {
-                                if (Directory.Exists(dst)) Directory.Delete(dst, true);
-                                Directory.Move(dir, dst);
-                                lock (_gate)
+                                foreach (ClientState c in _clients.Values)
                                 {
-                                    foreach (ClientState c in _clients.Values)
+                                    if (c.State == "进行中" || c.State == "等待中" || c.State == "离线")
                                     {
-                                        // 「离线」也要收进来：备份收尾（chmod）期间进度上报已停，
-                                        // 客户端可能已经被标成离线，但数据其实写完了。
-                                        if (c.State == "进行中" || c.State == "等待中" || c.State == "离线")
-                                        {
-                                            c.State = "已完成";
-                                            c.Result = "成功";
-                                            c.Percent = 100;
-                                            c.Updated = DateTime.Now;
-                                        }
+                                        c.State = "已完成";
+                                        c.Result = "成功（停止服务时归档为镜像）";
+                                        NormalizeCompleted(c);
+                                        c.Updated = DateTime.Now;
                                     }
                                 }
-                                ReportLog(string.Format("备份完成，已保存为镜像 {0}（{1:F1} GB）",
-                                    ImageName, total / 1073741824.0));
-                                RaiseClients();
-                                CheckAllDone("备份目录已重命名");
                             }
-                            catch (Exception ex) { ReportLog("备份重命名失败：" + ex.Message); }
+                            ReportLog(string.Format("备份数据已完整（{0:F1} GB），停止服务时归档为镜像 {1}",
+                                total / 1073741824.0, ImageName));
+                            RaiseClients();
+                            CheckAllDone("备份数据已完整");
                             lock (_gate) _sweepLast.Remove(name);
                         }
                         else

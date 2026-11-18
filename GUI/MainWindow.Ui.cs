@@ -182,7 +182,7 @@ namespace Fwoign
                 // 状态由内置 HTTP 服务判定（进行中 / 离线 / 已完成 / 已断开 / 出错 / 已停止）
                 row.StateBrush = StateToBrush(row.State);
                 row.ResultBrush = string.IsNullOrEmpty(row.Result) ? BrushTrace
-                                : (row.Result == "成功" ? BrushOk : BrushError);
+                                : (row.Result.StartsWith("成功", StringComparison.Ordinal) ? BrushOk : BrushError);
                 rows.Add(row);
             }
 

@@ -38,6 +38,29 @@ namespace Fwoign
             }
         }
 
+        /// <summary>
+        /// 镜像名只能用 ASCII：FOS 客户端是纯 ASCII 控制台，中文名会显示成 ??，
+        /// 并且会导致 "Unable to locate image store" 而还原失败（物理机实测确认）。
+        /// </summary>
+        private static bool IsAsciiImageName(string s, out string why)
+        {
+            why = null;
+            if (string.IsNullOrWhiteSpace(s)) { why = "镜像名不能为空。"; return false; }
+            if (s.Length > 64) { why = "镜像名太长（最多 64 个字符）。"; return false; }
+            foreach (char c in s)
+            {
+                bool ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                          || c == '-' || c == '_' || c == '.';
+                if (!ok)
+                {
+                    why = "镜像名只能用英文、数字和 - _ . ，不能用中文或其他符号。\n"
+                        + "FOS 客户端不支持中文，会把名字显示成 ?? 并导致还原失败。";
+                    return false;
+                }
+            }
+            return true;
+        }
+
         private BootTarget GetBootTarget()
         {
             switch (CbBootTarget.SelectedIndex)
@@ -402,6 +425,14 @@ namespace Fwoign
             if (!Directory.Exists(dir))
             {
                 SetBackupHint("备份路径不存在：" + dir, true);
+                return;
+            }
+
+            // 中文/非 ASCII 名会让 FOS 客户端显示成 ?? 并导致还原失败，先在这里拦住
+            string asciiWhy;
+            if (!IsAsciiImageName(name, out asciiWhy))
+            {
+                SetBackupHint(asciiWhy, true);
                 return;
             }
 

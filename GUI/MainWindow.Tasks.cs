@@ -102,7 +102,7 @@ namespace Fwoign
 
             try
             {
-                _srv.Start(isBackup, imageName, _ui.Osid, _ui.ImgFormat,
+                _srv.Start(isBackup, imageName, 0 /* 0 = 自动识别 */, _ui.ImgFormat,
                            target, proxyDhcp, poolStart, poolSize, serverIp, imagesDir, shutdownAfter,
                            multicast, expectedCount);
                 Log.Info(string.Format("三服务已启动：haneWIN + HTTP stub + Tiny PXE，绑定 {0}，地址池 {1}/{2}，模式 {3}，镜像目录 {4}，完成后 {5}",
@@ -150,6 +150,14 @@ namespace Fwoign
                 return;
             }
 
+            string nameWhy;
+            if (!IsAsciiImageName(name, out nameWhy))
+            {
+                hc.MessageBox.Show(nameWhy, "镜像名不合法", MessageBoxButton.OK, MessageBoxImage.Warning);
+                TxtBackupName.Focus();
+                return;
+            }
+
             string imagesDir = ResolveImagesDir(TxtBackupPath, false, "备份");
             if (imagesDir == null) return;
 
@@ -171,6 +179,14 @@ namespace Fwoign
             if (string.IsNullOrEmpty(imgName))
             {
                 hc.Growl.Warning("请先在列表中选择要还原的镜像。");
+                return;
+            }
+
+            string imgWhy;
+            if (!IsAsciiImageName(imgName, out imgWhy))
+            {
+                hc.MessageBox.Show("选中的镜像名不合规，无法还原：\n\n" + imgWhy,
+                    "镜像名不合法", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
@@ -270,7 +286,9 @@ namespace Fwoign
             _srv.Http.MarkRemainingStopped("多播失败：" + why);
             SetStatus("多播失败：" + why);
             hc.Growl.Error("多播失败：" + why);
-            OnTaskCompleted("多播失败");
+            Log.Task("多播失败：" + why);
+            // 不停服务：客户端可能仍在收尾，由人工确认后再点「停止」
+            UpdateRunState();
         }
 
         private void OnMcastDone()
@@ -330,27 +348,21 @@ namespace Fwoign
         /// </summary>
         private void OnTaskCompleted(string what)
         {
-            // HTTP 服务在后台线程触发，必须切回界面线程：
-            // UpdateRunState 操作控件，跨线程会抛异常；停服务也应在 UI 线程做。
+            // HTTP 服务在后台线程触发，必须切回界面线程
             if (!Dispatcher.CheckAccess())
             {
                 Dispatcher.BeginInvoke(new Action<string>(OnTaskCompleted), what);
                 return;
             }
 
-            // 不要用 IsRunning 提前返回——三个服务里只要有一个已经退出，
-            // IsRunning 就是 false，会导致剩下的服务停不掉。
-            bool anyRunning = _srv.IsNfsRunning || _srv.IsHttpRunning || _srv.IsPxeRunning;
-            try { _srv.Stop(); } catch (Exception ex) { Log.Error("自动停止服务失败", ex); }
-
-            Log.Task(anyRunning
-                ? "任务结束（" + what + "），服务已自动停止"
-                : "任务结束（" + what + "），服务此前已停止");
-
+            // 按需求：服务一律不自动停止。客户端在还原/备份结束后还要做分区表恢复、
+            // NTFS 缩放、UUID 重写等收尾动作，全都依赖 NFS 与 HTTP；
+            // 一旦自动停服务，还没收尾完的机器会直接卡死（实测 10 台只成功 1 台就停了）。
+            Log.Info("客户端全部结束（{0}），服务保持运行，等待手动停止", what);
             if (BtnForceStart != null) BtnForceStart.IsEnabled = false;
             UpdateRunState();
-            SetStatus("任务已结束（" + what + "），服务已自动停止");
-            hc.Growl.Info("任务已结束：" + what + "\n服务已自动停止");
+            SetStatus("客户端已全部结束（" + what + "），服务仍在运行，可点「停止」结束");
+            hc.Growl.Success("客户端已全部结束：" + what + "\n服务保持运行，确认无误后点「停止」");
         }
 
         /// <summary>服务是否在运行 → 决定哪个按钮可用。</summary>
