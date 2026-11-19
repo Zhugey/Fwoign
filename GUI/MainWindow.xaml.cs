@@ -51,7 +51,8 @@ namespace Fwoign
             try
             {
                 Version v = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
-                Title = "Fwoign V" + v.ToString(2);
+                // 1.2.0 → V1.2；1.2.1 → V1.2.1（补丁号非 0 时才显示第三段）
+                Title = "Fwoign V" + (v.Build > 0 ? v.ToString(3) : v.ToString(2));
             }
             catch { }
 

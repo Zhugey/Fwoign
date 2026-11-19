@@ -96,6 +96,7 @@ namespace Fwoign
 
             // 2) 内置 HTTP 服务（引导文件下发 + FOS 回调 + 备份收尾）
             //    早期是外部 Python 脚本，现改为进程内实现，不再依赖 python.exe。
+            _http.ServerIp = serverIp;
             _http.ImagePartCount = isBackup ? 0 : CountPartitions(images, imageName);
             _http.PartSizes = isBackup ? null : ReadPartSizes(images, imageName);
             _http.Start(images, AppConfig.BootDir, imageName, 80);
@@ -475,6 +476,7 @@ namespace Fwoign
 
             // 备份任务：把本次的 MAC 目录归档成正式镜像名。
             // 放在停止时做（而不是客户端回调里），与 FOS 完全解耦。
+            try { _http.CleanupIncompleteCaptures(); } catch (Exception ex) { Log.Warn("清理未完成备份失败：" + ex.Message); }
             try { _http.FinalizePendingCaptures(); } catch (Exception ex) { Log.Warn("归档备份镜像失败：" + ex.Message); }
 
             try { _http.Stop(); } catch { }

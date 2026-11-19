@@ -75,6 +75,56 @@ namespace Fwoign
 
         // ===== 启停 =====
 
+        /// <summary>本机服务地址（由 ServerController 设置），用于来源网段校验。</summary>
+        public string ServerIp = "";
+
+        /// <summary>MAC 目录名必须是 12 位十六进制，杜绝路径穿越（P0-1）。</summary>
+        private static bool IsMacHex(string name)
+        {
+            if (name == null || name.Length != 12) return false;
+            for (int i = 0; i < name.Length; i++)
+            {
+                char c = name[i];
+                bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+                if (!ok) return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// 把「一个名字」解析成 ImagesDir 下的绝对路径，并确保它真的在 ImagesDir 之内。
+        /// 任何分隔符、"."、".."、非法字符一律返回 null（P0-1 / P0-2 的统一出口）。
+        /// </summary>
+        private string ResolveUnderImages(string name)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(name)) return null;
+                if (name == "." || name == "..") return null;
+                if (name.IndexOf('/') >= 0 || name.IndexOf('\\') >= 0) return null;
+                if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return null;
+
+                string root = Path.GetFullPath(ImagesDir);
+                string full = Path.GetFullPath(Path.Combine(root, name));
+                if (!full.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase)) return null;
+                return full;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>来源网段校验：只接受与本机同一 /24 的客户端（P0 防护的①）。</summary>
+        private bool IsAllowedClient(string ip)
+        {
+            if (string.IsNullOrEmpty(ServerIp) || string.IsNullOrEmpty(ip)) return true;
+            if (ip == "127.0.0.1" || ip == "::1") return true;
+
+            string c = ip.StartsWith("::ffff:", StringComparison.OrdinalIgnoreCase) ? ip.Substring(7) : ip;
+            string[] a = c.Split('.');
+            string[] b = ServerIp.Split('.');
+            if (a.Length != 4 || b.Length != 4) return true;   // 解析不了就不拦
+            return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+        }
+
         /// <summary>本次镜像的分区数（单播时用；多播由发送端提供）。0 = 未知。</summary>
         public int ImagePartCount;
 
@@ -334,10 +384,10 @@ namespace Fwoign
             if (!string.Equals(TaskType, "up", StringComparison.OrdinalIgnoreCase)) return false;
 
             string name = (c.Mac ?? "").Replace(":", "").Replace("-", "").ToLowerInvariant();
-            if (name.Length != 12) return false;
+            if (!IsMacHex(name)) return false;
 
-            string dir = Path.Combine(ImagesDir, name);
-            if (!LooksComplete(dir)) return false;
+            string dir = ResolveUnderImages(name);
+            if (dir == null || !LooksComplete(dir)) return false;
 
             // 数据写完（没有 .000 残留）但没等到回调：只标状态，
             // 目录留到点「停止」时统一重命名（见 FinalizePendingCaptures）。
@@ -353,6 +403,36 @@ namespace Fwoign
         }
 
         /// <summary>
+        /// 停止服务时调用：清掉本次备份里「没写完」的 MAC 目录。
+        /// 按需求，备份失败/中断不留下残目录（写完的由 FinalizePendingCaptures 归档）。
+        /// </summary>
+        public void CleanupIncompleteCaptures()
+        {
+            if (!string.Equals(TaskType, "up", StringComparison.OrdinalIgnoreCase)) return;
+
+            foreach (ClientState c in Snapshot())
+            {
+                string mac = (c.Mac ?? "").Replace(":", "").Replace("-", "").ToLowerInvariant();
+                if (!IsMacHex(mac)) continue;
+
+                string dir = ResolveUnderImages(mac);
+                if (dir == null || !Directory.Exists(dir)) continue;
+                if (LooksComplete(dir)) continue;      // 完整的留给归档
+
+                try
+                {
+                    Directory.Delete(dir, true);
+                    ReportLog("已清理未完成的备份目录 " + mac);
+                }
+                catch (Exception ex)
+                {
+                    ReportLog(string.Format("清理未完成的备份目录 {0} 失败：{1}", mac, ex.Message));
+                    lock (_gate) { if (!_pendingDelete.Contains(mac)) _pendingDelete.Add(mac); }
+                }
+            }
+        }
+
+        /// <summary>
         /// 停止服务时调用：把本次备份产生的 MAC 目录归档为正式镜像名。
         /// 放在这里而不是回调里，是因为重命名与 FOS 无关，
         /// 而且此时服务已停、客户端已断开，不会再出现目录占用。
@@ -362,19 +442,50 @@ namespace Fwoign
             if (!string.Equals(TaskType, "up", StringComparison.OrdinalIgnoreCase)) return;
             if (string.IsNullOrEmpty(ImageName)) return;
 
-            string dst = Path.Combine(ImagesDir, ImageName);
+            // 目标名同样要过关：名字非法就整体放弃，绝不拼路径
+            string dst = ResolveUnderImages(ImageName);
+            if (dst == null)
+            {
+                ReportLog("镜像名不合法，已跳过归档：" + ImageName);
+                return;
+            }
+
             foreach (ClientState c in Snapshot())
             {
                 string mac = (c.Mac ?? "").Replace(":", "").Replace("-", "").ToLowerInvariant();
-                if (mac.Length != 12) continue;
+                if (!IsMacHex(mac)) continue;
 
-                string src = Path.Combine(ImagesDir, mac);
-                if (!Directory.Exists(src) || !LooksComplete(src)) continue;
+                string src = ResolveUnderImages(mac);
+                if (src == null || !Directory.Exists(src) || !LooksComplete(src)) continue;
 
                 try
                 {
-                    if (Directory.Exists(dst)) Directory.Delete(dst, true);
-                    Directory.Move(src, dst);
+                    // 绝不先删旧镜像：先挪开 → 再落新 → 成功后才清理旧目录。
+                    // 中途失败就把它挪回来，保证任何时刻都有一份完整镜像在。
+                    string old = null;
+                    if (Directory.Exists(dst))
+                    {
+                        old = dst + ".old-" + DateTime.Now.ToString("yyyyMMddHHmmss");
+                        Directory.Move(dst, old);
+                    }
+
+                    try
+                    {
+                        Directory.Move(src, dst);
+                    }
+                    catch
+                    {
+                        if (old != null && !Directory.Exists(dst))
+                        {
+                            try { Directory.Move(old, dst); } catch { }
+                        }
+                        throw;
+                    }
+
+                    if (old != null)
+                    {
+                        try { Directory.Delete(old, true); } catch { }
+                    }
                     ReportLog(string.Format("已归档备份镜像：{0}（来自 {1}）", ImageName, mac));
                 }
                 catch (Exception ex)
@@ -394,10 +505,10 @@ namespace Fwoign
             if (!string.Equals(TaskType, "up", StringComparison.OrdinalIgnoreCase)) return;
 
             string name = (mac ?? "").Replace(":", "").Replace("-", "").ToLowerInvariant();
-            if (name.Length != 12) return;
+            if (!IsMacHex(name)) { ReportLog("忽略非法 MAC 目录名：" + name); return; }
 
-            string dir = Path.Combine(ImagesDir, name);
-            if (!Directory.Exists(dir)) return;
+            string dir = ResolveUnderImages(name);
+            if (dir == null || !Directory.Exists(dir)) return;
 
             // 数据其实完整 → 这是误判，绝不能删
             if (LooksComplete(dir))
@@ -433,7 +544,9 @@ namespace Fwoign
 
             foreach (string name in todo)
             {
-                string dir = Path.Combine(ImagesDir, name);
+                if (!IsMacHex(name)) { lock (_gate) _pendingDelete.Remove(name); continue; }
+                string dir = ResolveUnderImages(name);
+                if (dir == null) { lock (_gate) _pendingDelete.Remove(name); continue; }
                 if (!Directory.Exists(dir))
                 {
                     lock (_gate) _pendingDelete.Remove(name);
@@ -632,6 +745,13 @@ namespace Fwoign
                     _currentIp = ep != null ? ep.Address.ToString() : "";
                 }
                 catch { _currentIp = ""; }
+
+                if (!IsAllowedClient(_currentIp))
+                {
+                    ReportLog(string.Format("拒绝来自 {0} 的请求：不在本机网段", _currentIp));
+                    SendText(ns, "forbidden", 403, "Forbidden");
+                    return;
+                }
 
                 Route(ns, method, path, query, body);
             }

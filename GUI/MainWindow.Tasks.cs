@@ -158,6 +158,16 @@ namespace Fwoign
                 return;
             }
 
+            // 重名拦截：以前只是提示，实际会覆盖并删除旧镜像（P0-3）
+            if (_backupNameConflict)
+            {
+                hc.MessageBox.Show(
+                    "该目录下已存在同名镜像，整盘备份不会覆盖它。\n\n请换一个名字后再开始。",
+                    "镜像已存在", MessageBoxButton.OK, MessageBoxImage.Warning);
+                TxtBackupName.Focus();
+                return;
+            }
+
             string imagesDir = ResolveImagesDir(TxtBackupPath, false, "备份");
             if (imagesDir == null) return;
 

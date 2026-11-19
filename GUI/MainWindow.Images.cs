@@ -47,6 +47,12 @@ namespace Fwoign
             why = null;
             if (string.IsNullOrWhiteSpace(s)) { why = "镜像名不能为空。"; return false; }
             if (s.Length > 64) { why = "镜像名太长（最多 64 个字符）。"; return false; }
+            // "." / ".." / ".xxx" 会把归档路径指到镜像库之外，一律禁止
+            if (s == "." || s == ".." || s.StartsWith(".", StringComparison.Ordinal))
+            {
+                why = "镜像名不能以点开头，也不能是 . 或 .. 。";
+                return false;
+            }
             foreach (char c in s)
             {
                 bool ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
@@ -332,7 +338,18 @@ namespace Fwoign
             ListRestoreImage.Items.Clear();
             string dir = ResolveDirForList(TxtRestoreFolder, "镜像");
             if (dir == null) return;
-            foreach (string d in Directory.GetDirectories(dir))
+
+            // 上次保存的镜像目录可能是断开的网络盘 / 无权限路径，
+            // 这个函数在构造函数里被调用，抛出去就是启动即崩（P2-02）。
+            string[] dirs;
+            try { dirs = Directory.GetDirectories(dir); }
+            catch (Exception ex)
+            {
+                Log.Warn("扫描镜像目录失败（{0}）：{1}", dir, ex.Message);
+                return;
+            }
+
+            foreach (string d in dirs)
             {
                 // 镜像目录判定：含 d1.mbr 且至少有一个分区镜像（d1pN.img 或正在写入的 .000）
                 if (!File.Exists(Path.Combine(d, "d1.mbr"))) continue;
