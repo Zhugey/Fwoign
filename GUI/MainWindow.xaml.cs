@@ -38,6 +38,7 @@ namespace Fwoign
         public MainWindow()
         {
             Log.Init();               // 先建日志，后面的初始化步骤才会按顺序记进详细日志
+
             try
             {
                 Log.Detail("程序版本（exe 修改时间）：{0:yyyy-MM-dd HH:mm:ss}",
@@ -45,6 +46,15 @@ namespace Fwoign
             }
             catch { }
             InitializeComponent();
+
+            // 标题必须在 InitializeComponent 之后再设：XAML 里的 Title 会覆盖先前的赋值
+            try
+            {
+                Version v = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+                Title = "Fwoign V" + v.ToString(2);
+            }
+            catch { }
+
             FitToScreen();            // 先按屏幕可用区域收拢，再摆内容
             LoadAdapters();
             LoadUiSettings();

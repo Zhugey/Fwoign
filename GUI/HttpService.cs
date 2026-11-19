@@ -37,6 +37,7 @@ namespace Fwoign
             public double Percent;           // 整任务进度（多分区时由各分区加权得到）
             public double LastRawPct;        // 上次收到的「当前分区」百分比，用来识别分区切换
             public int PartIdx;              // 客户端当前处于第几个分区（0 基）
+            public bool RawLogged;           // 是否已把首条原始状态串写进详细日志
             public DateTime Updated = DateTime.Now;
         }
 
@@ -76,6 +77,9 @@ namespace Fwoign
 
         /// <summary>本次镜像的分区数（单播时用；多播由发送端提供）。0 = 未知。</summary>
         public int ImagePartCount;
+
+        /// <summary>镜像各分区的字节大小（读 d1.partitions），用于把客户端上报的 totalsize 换算成分区序号。</summary>
+        public long[] PartSizes;
 
         public void Start(string imagesDir, string bootDir, string imageName, int port)
         {
@@ -880,6 +884,28 @@ namespace Fwoign
             if (notify) RaiseClients();
         }
 
+        /// <summary>
+        /// 把客户端上报的 totalsize（字节）匹配到镜像分区表的第几个分区。
+        /// 允许 2% 或 1MB 的误差：设备大小与镜像记录可能有对齐差异。
+        /// 返回 -1 表示无法判定。
+        /// </summary>
+        private static int MatchPartIndex(long[] layout, string totalsize)
+        {
+            if (layout == null || layout.Length == 0 || string.IsNullOrWhiteSpace(totalsize)) return -1;
+
+            double v;
+            if (!double.TryParse(totalsize.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out v) || v <= 0)
+                return -1;
+
+            for (int i = 0; i < layout.Length; i++)
+            {
+                double size = layout[i];
+                double tol = Math.Max(1024.0 * 1024.0, size * 0.02);
+                if (Math.Abs(size - v) <= tol) return i;
+            }
+            return -1;
+        }
+
         private void UpdateProgress(string ip, string mac, string statusB64)
         {
             string line;
@@ -921,16 +947,40 @@ namespace Fwoign
                 if (mc != null) sizes = mc.PartitionSizes;
 
                 int totalParts = (sizes != null ? sizes.Length : ImagePartCount);
-                if (totalParts > 1)
+
+                // 分区号判定：优先用客户端上报的 totalsize（第 7 字段，设备总字节）
+                // 与镜像 d1.partitions 里的分区大小做匹配——这是精确的，不依赖百分比推断。
+                // 匹配不到（例如备份任务、或镜像没有 d1.partitions）时，退回「百分比大幅回落」的推断。
+                long[] layout = PartSizes;
+                int matched = MatchPartIndex(layout, p.Length > 6 ? p[6] : null);
+                if (matched < 0 && p.Length > 4)
+                {
+                    // 退一步：拿「当前分区总量」（第 5 字段，形如 13.70GiB）再匹配一次，
+                    // 防止某些 partclone 版本的 totalsize 不是设备字节而是数据量
+                    double tb = ToBytes(p[4]);
+                    if (tb > 0) matched = MatchPartIndex(layout, tb.ToString("F0", CultureInfo.InvariantCulture));
+                }
+
+                if (matched >= 0)
+                {
+                    c.PartIdx = matched;
+                }
+                else if (totalParts > 1)
                 {
                     if (pct + 15.0 < c.LastRawPct && c.PartIdx < totalParts - 1) c.PartIdx++;
                     if (c.PartIdx < 0) c.PartIdx = 0;
+                }
+
+                if (!c.RawLogged)
+                {
+                    c.RawLogged = true;
+                    try { Log.Detail("客户端 {0} 首条状态：{1}", ip, line); } catch { }
                 }
                 c.LastRawPct = pct;
                 c.Percent = pct;                 // 当前分区进度，0-100%
 
                 multiPart = totalParts > 1;
-                partNo = c.PartIdx + 1;
+                partNo = Math.Min(c.PartIdx + 1, Math.Max(1, totalParts));
                 partTotal = totalParts;
                 if (multiPart)
                     c.Progress = string.Format("分区 {0}/{1} · {2}", partNo, partTotal, c.Progress);

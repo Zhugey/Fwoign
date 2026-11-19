@@ -303,7 +303,7 @@ namespace Fwoign
             // 这里不停服务，等客户端各自完成/断开后由 HttpService 统一收尾。
             if (BtnForceStart != null) BtnForceStart.IsEnabled = false;
             SetStatus("多播数据已发送完毕，等待客户端完成写盘…");
-            Log.Task("多播数据发送完毕，等待客户端写盘（全部完成后自动停服务）");
+            Log.Task("多播数据发送完毕，等待客户端写盘");
             hc.Growl.Success("多播数据已发送完毕\n等待各客户端完成写盘");
         }
 

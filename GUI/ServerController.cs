@@ -97,6 +97,7 @@ namespace Fwoign
             // 2) 内置 HTTP 服务（引导文件下发 + FOS 回调 + 备份收尾）
             //    早期是外部 Python 脚本，现改为进程内实现，不再依赖 python.exe。
             _http.ImagePartCount = isBackup ? 0 : CountPartitions(images, imageName);
+            _http.PartSizes = isBackup ? null : ReadPartSizes(images, imageName);
             _http.Start(images, AppConfig.BootDir, imageName, 80);
             Log.Detail("内置 HTTP 服务已启动（端口 80，镜像目录 {0}）", images);
 
@@ -148,6 +149,43 @@ namespace Fwoign
             catch { }
             // 备份目标还没有 fstypes，默认按 Windows 处理
             return 9;
+        }
+
+        /// <summary>
+        /// 读取镜像的 d1.partitions（sfdisk 导出格式），返回每个分区的字节大小。
+        /// 用途：客户端进度上报里带 totalsize（设备总字节），据此可以精确判定
+        /// 「现在在还原第几个分区」，不再靠百分比回落去猜。
+        /// </summary>
+        private static long[] ReadPartSizes(string imagesDir, string imageName)
+        {
+            try
+            {
+                string f = Path.Combine(imagesDir ?? "", imageName ?? "", "d1.partitions");
+                if (!File.Exists(f)) return null;
+
+                long sector = 512;
+                var sizes = new List<long>();
+                foreach (string raw in File.ReadAllLines(f))
+                {
+                    string t = raw.Trim();
+                    if (t.StartsWith("sector-size:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        long v;
+                        if (long.TryParse(t.Substring("sector-size:".Length).Trim(), out v) && v > 0) sector = v;
+                        continue;
+                    }
+                    int i = t.IndexOf("size=", StringComparison.OrdinalIgnoreCase);
+                    if (i < 0) continue;
+                    string rest = t.Substring(i + 5);
+                    int comma = rest.IndexOf(',');
+                    if (comma > 0) rest = rest.Substring(0, comma);
+                    long sectors;
+                    if (long.TryParse(rest.Trim(), out sectors) && sectors > 0)
+                        sizes.Add(sectors * sector);
+                }
+                return sizes.Count > 0 ? sizes.ToArray() : null;
+            }
+            catch { return null; }
         }
 
         /// <summary>统计镜像目录下的分区文件个数（还原时用来显示"分区 2/3"）。</summary>
