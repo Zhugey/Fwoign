@@ -23,11 +23,6 @@ namespace Fwoign
     /// <summary>镜像与目录：列表、浏览、备份路径提示</summary>
     public partial class MainWindow
     {
-        private int GetImgFormat()
-        {
-            return CbImgFormat.SelectedIndex == 1 ? 6 : 5;
-        }
-
         private string GetBootTargetName()
         {
             switch (CbBootTarget.SelectedIndex)

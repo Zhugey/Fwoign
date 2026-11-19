@@ -23,7 +23,7 @@ namespace Fwoign
         public IniFile(string path)
         {
             _path = path;
-            if (File.Exists(path)) Parse(File.ReadAllLines(path, Encoding.Default));
+            if (File.Exists(path)) Parse(ReadLines(path));
         }
 
         private void Parse(string[] lines)
@@ -68,6 +68,17 @@ namespace Fwoign
             GetSection(section)[key] = value;
         }
 
+        /// <summary>读文件：优先按 UTF-8（严格）解码，失败再按系统默认编码（兼容老的 GBK 文件）。</summary>
+        private static string[] ReadLines(string path)
+        {
+            byte[] bytes = File.ReadAllBytes(path);
+            string text;
+            try { text = new UTF8Encoding(false, true).GetString(bytes); }
+            catch { text = Encoding.Default.GetString(bytes); }
+            if (text.Length > 0 && text[0] == '\uFEFF') text = text.Substring(1);
+            return text.Replace("\r\n", "\n").Split('\n');
+        }
+
         public void Save()
         {
             var sb = new StringBuilder();
@@ -78,7 +89,17 @@ namespace Fwoign
                     sb.AppendLine(kv.Key + "=" + kv.Value);
                 sb.AppendLine();
             }
-            File.WriteAllText(_path, sb.ToString(), Encoding.Default);
+
+            // 原子写：ipbackup.ini 是 IP 还原的唯一依据，写一半崩掉就等于永久丢失（P2-03）
+            string tmp = _path + ".tmp";
+            File.WriteAllText(tmp, sb.ToString(), Encoding.Default);
+            if (File.Exists(_path))
+            {
+                try { File.Replace(tmp, _path, null); return; }
+                catch { /* 某些文件系统不支持 Replace，退回覆盖写 */ }
+            }
+            File.Copy(tmp, _path, true);
+            try { File.Delete(tmp); } catch { }
         }
     }
 
@@ -207,7 +228,7 @@ namespace Fwoign
         public string ImageName = "";    // 备份/还原使用的镜像名
         public int Count = 1;            // 刻台数
         public int Osid = 10;            // Windows 11 = 10，Win10 = 9
-        public int ImgFormat = 5;        // 5=zstd 单文件，6=zstd 分片
+        public int ImgFormat = 5;        // 固定 5（zstd 单文件）；分片选项已移除
 
         private static string FilePath
         {

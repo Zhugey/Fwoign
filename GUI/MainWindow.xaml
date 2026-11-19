@@ -268,16 +268,6 @@
 
                         <!-- 右：备份名称 + 目标提示 -->
                         <StackPanel Grid.Column="1" VerticalAlignment="Top">
-                            <!-- 镜像格式只对备份有效，从公共选项区移到这里，默认单文件且不记忆 -->
-                            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-                                <TextBlock Text="镜像格式" VerticalAlignment="Center" Width="62" FontSize="12"/>
-                                <ComboBox x:Name="CbImgFormat" Width="170" Height="26" FontSize="12"
-                                          VerticalAlignment="Center" SelectedIndex="0"
-                                          ToolTip="单文件（zstd）与 FOG 默认一致；分片用于超大镜像">
-                                    <ComboBoxItem Content="单文件（zstd）"/>
-                                    <ComboBoxItem Content="分片（200MB/片）"/>
-                                </ComboBox>
-                            </StackPanel>
                             <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
                                 <TextBlock Text="备份名称" VerticalAlignment="Center" Width="62" FontSize="12"/>
                                 <TextBox x:Name="TxtBackupName" Width="260" Height="26" FontSize="12" VerticalAlignment="Center"

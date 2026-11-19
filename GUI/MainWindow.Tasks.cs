@@ -23,7 +23,36 @@ namespace Fwoign
     /// <summary>任务编排：启动/停止、事件回调、运行状态</summary>
     public partial class MainWindow
     {
+        /// <summary>
+        /// 启动入口：加互斥，防止「开始」被连点两次导致两套 netsh 与两次 _srv.Start 并发（P1-15）。
+        /// </summary>
         private async void StartServers(bool isBackup, BootTarget target, string imageName, string imagesDir,
+            bool multicast, int expectedCount)
+        {
+            if (Interlocked.CompareExchange(ref _starting, 1, 0) != 0)
+            {
+                hc.Growl.Warning("上一次启动还没完成，请稍候。");
+                return;
+            }
+
+            if (BtnStart != null) BtnStart.IsEnabled = false;
+            try
+            {
+                await StartServersCore(isBackup, target, imageName, imagesDir, multicast, expectedCount);
+            }
+            catch (Exception ex)
+            {
+                Log.Error("启动服务时发生未处理异常", ex);
+                SetStatus("启动失败：" + ex.Message);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _starting, 0);
+                UpdateRunState();
+            }
+        }
+
+        private async System.Threading.Tasks.Task StartServersCore(bool isBackup, BootTarget target, string imageName, string imagesDir,
             bool multicast, int expectedCount)
         {
             // 后台还在应用 IP 时先别启动：两条 netsh 并行会互相覆盖
@@ -110,6 +139,10 @@ namespace Fwoign
                     shutdownAfter ? "关机" : "重启"));
                 if (proxyDhcp)
                     Log.Info("有路由器模式：客户端 IP 由路由器 DHCP 分配，本机地址池不参与分配");
+
+                // PXE 绑定自检：以前这段代码写好了却从未调用（P2-07），
+                // Tiny 绑到 127.0.0.1 时现场只会表现为「客户端拿不到 DHCP」。
+                _ = VerifyPxeBindingAsync(serverIp);
             }
             catch (Exception ex)
             {

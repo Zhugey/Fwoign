@@ -32,7 +32,8 @@ namespace Fwoign
         public bool IsNfsRunning { get { return _nfs != null && !_nfs.HasExited; } }
         public bool IsHttpRunning { get { return _http.IsRunning; } }
         public bool IsPxeRunning { get { return _pxe != null && !_pxe.HasExited; } }
-        public bool IsRunning { get { return IsNfsRunning && IsHttpRunning && IsPxeRunning; } }
+        /// <summary>任一服务仍在运行就算“在跑”：否则部分启动失败时用户点不了「停止」（P1-11）。</summary>
+        public bool IsRunning { get { return IsNfsRunning || IsHttpRunning || IsPxeRunning; } }
 
         public int PxeProcessId { get { return _pxe != null && !_pxe.HasExited ? _pxe.Id : 0; } }
 
@@ -49,7 +50,26 @@ namespace Fwoign
             BootTarget target, bool proxyDhcp, string poolStart, int poolSize, string serverIp,
             string imagesDir, bool shutdownAfter, bool multicast, int expectedCount)
         {
-            Stop();
+            Stop();     // 先清干净上一轮
+
+            // 启动任何一步失败都回滚已起来的部分，否则会留下 haneWIN 占着 NFS 端口，
+            // 而界面又因为 IsRunning 为 false 不让点「停止」（P1-11）
+            try
+            {
+                StartCore(isBackup, imageName, osid, imgFormat, target, proxyDhcp,
+                          poolStart, poolSize, serverIp, imagesDir, shutdownAfter, multicast, expectedCount);
+            }
+            catch
+            {
+                try { Stop(); } catch { }
+                throw;
+            }
+        }
+
+        private void StartCore(bool isBackup, string imageName, int osid, int imgFormat,
+            BootTarget target, bool proxyDhcp, string poolStart, int poolSize, string serverIp,
+            string imagesDir, bool shutdownAfter, bool multicast, int expectedCount)
+        {
 
             string images = NormalizeImagesDir(imagesDir);
 
@@ -471,15 +491,14 @@ namespace Fwoign
         public void Stop()
         {
             try { _mcast.Stop(); } catch { }
+            try { _http.Stop(); } catch { }        // 先关 HTTP，避免收尾阶段还有回调进来
             Kill(ref _pxe, "TinyPXE");
-            Kill(ref _nfs, "haneWIN");      // 先停 NFS，释放镜像目录的占用
+            Kill(ref _nfs, "haneWIN");              // 再停 NFS，释放镜像目录的占用
 
-            // 备份任务：把本次的 MAC 目录归档成正式镜像名。
+            // 备份任务：清理未写完的目录 + 把写完的归档成正式镜像名。
             // 放在停止时做（而不是客户端回调里），与 FOS 完全解耦。
             try { _http.CleanupIncompleteCaptures(); } catch (Exception ex) { Log.Warn("清理未完成备份失败：" + ex.Message); }
             try { _http.FinalizePendingCaptures(); } catch (Exception ex) { Log.Warn("归档备份镜像失败：" + ex.Message); }
-
-            try { _http.Stop(); } catch { }
             Log.Detail("三服务已停止");
         }
 
@@ -498,32 +517,38 @@ namespace Fwoign
             {
                 if (!p.HasExited)
                 {
-                    p.Kill();
-                    if (p.WaitForExit(3000))
+                    // 直接按进程树结束：父进程先退出会把子进程留在后台占端口（P1-12），
+                    // 所以不能"父进程退出了就当没事"。
+                    if (pid > 0) KillTree(pid, name);
+                    else p.Kill();
+
+                    if (!p.WaitForExit(5000))
+                    {
+                        Log.Warn("{0} 未在 5 秒内退出", name);
+                        try { p.Kill(); } catch { }
+                        try { p.WaitForExit(2000); } catch { }
+                    }
+                    else
                     {
                         Log.Detail("{0} 已停止", name);
-                        p = null;
-                        return;
                     }
-                    Log.Warn("{0} 未在 3 秒内退出，改为强制结束进程树", name);
                 }
                 else
                 {
+                    // 主进程已退出，但可能还留着子进程，同样清一次树
+                    if (pid > 0) KillTree(pid, name);
                     Log.Detail("{0} 此前已退出", name);
-                    p = null;
-                    return;
                 }
             }
             catch (Exception ex)
             {
-                Log.Warn("{0} 停止时出错：{1}", name, ex.Message);
+                Log.Warn("结束 {0} 失败：{1}", name, ex.Message);
             }
 
-            if (pid > 0) KillTree(pid, name);
+            try { p.Dispose(); } catch { }
             p = null;
         }
 
-        /// <summary>taskkill /F /T 结束整个进程树（含子进程），并确认结果。</summary>
         private static void KillTree(int pid, string name)
         {
             try

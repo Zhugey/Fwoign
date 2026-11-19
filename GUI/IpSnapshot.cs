@@ -225,7 +225,8 @@ namespace Fwoign
             var result = new RestoreResult();
             if (!File.Exists(SnapshotPath)) return result;
 
-            foreach (NetworkAdapter a in HardwareInfo.GetAdapters())
+            // 含已禁用/未连接的网卡：否则拔着网线退出时 IP 永远不会被还原
+            foreach (NetworkAdapter a in HardwareInfo.GetAdapters(true))
             {
                 IpSnapshot snap;
                 try { snap = Load(a.Mac); }

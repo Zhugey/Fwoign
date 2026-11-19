@@ -24,16 +24,19 @@ namespace Fwoign
     public static class HardwareInfo
     {
         /// <summary>枚举以太网/千兆网卡，返回名称、MAC、IP。</summary>
-        public static List<NetworkAdapter> GetAdapters()
+        public static List<NetworkAdapter> GetAdapters(bool includeDown = false)
         {
             var list = new List<NetworkAdapter>();
             foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
             {
-                if (nic.OperationalStatus != OperationalStatus.Up) continue;
+                // includeDown：网线拔掉 / 网卡被禁用时状态不是 Up，
+                // 但退出时仍然要能把 IP 还原回去（P2-01），所以不能一律过滤掉。
+                if (!includeDown && nic.OperationalStatus != OperationalStatus.Up) continue;
                 var type = nic.NetworkInterfaceType;
-                if (type != NetworkInterfaceType.Ethernet &&
-                    type != NetworkInterfaceType.GigabitEthernet)
-                    continue;
+                bool okType = type == NetworkInterfaceType.Ethernet
+                           || type == NetworkInterfaceType.GigabitEthernet
+                           || (includeDown && type == NetworkInterfaceType.Unknown);
+                if (!okType) continue;
 
                 string mac = nic.GetPhysicalAddress().ToString(); // 无分隔符
                 if (mac.Length != 12) continue;

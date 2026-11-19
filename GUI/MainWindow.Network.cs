@@ -118,11 +118,22 @@ namespace Fwoign
             // netsh 与「等地址生效」都是阻塞调用（最长 8 秒），放到线程池执行，
             // 否则点“开始”后界面会整段冻住，用户会以为程序卡死。
             string connName = nic.ConnName;
-            await System.Threading.Tasks.Task.Run(delegate
+
+            // 标记“正在改 IP”：退出流程靠这个标志等它结束，否则会出现
+            // 「还原完 IP → 后台 netsh 才生效 → 网卡停在网刻地址」（P1-14）
+            Interlocked.Exchange(ref _ipApplying, 1);
+            try
             {
-                HardwareInfo.SetStaticIp(connName, want, mask);
-                HardwareInfo.WaitForIp(connName, want, 8000);
-            });
+                await System.Threading.Tasks.Task.Run(delegate
+                {
+                    HardwareInfo.SetStaticIp(connName, want, mask);
+                    HardwareInfo.WaitForIp(connName, want, 8000);
+                });
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _ipApplying, 0);
+            }
 
             await System.Threading.Tasks.Task.Delay(300);
             RefreshAdapters(nic.Name);

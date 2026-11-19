@@ -47,7 +47,7 @@ namespace Fwoign
         private Thread _watch;
         private volatile bool _running;
         private int _generation;      // 每次 Start 自增，用来让上一轮的线程自行退出
-        private bool _completedRaised;   // 任务完成信号只发一次
+        private int _completedRaised;    // 任务完成信号只发一次（0/1，Interlocked）
 
         private readonly object _gate = new object();
         private readonly Dictionary<string, ClientState> _clients = new Dictionary<string, ClientState>();
@@ -137,7 +137,7 @@ namespace Fwoign
             BootDir = bootDir;
             ImageName = imageName;
             TaskType = "";
-            _completedRaised = false;
+            _completedRaised = 0;
             lock (_gate)
             {
                 _clients.Clear();
@@ -568,7 +568,8 @@ namespace Fwoign
         /// </summary>
         private void CheckAllDone(string reason)
         {
-            if (_completedRaised) return;
+            // 原子判定，避免多线程下重复触发 TaskCompleted（P2-10）
+            if (Interlocked.CompareExchange(ref _completedRaised, 1, 0) != 0) return;
 
             bool any = false, allDone = true;
             lock (_gate)
@@ -583,7 +584,6 @@ namespace Fwoign
             }
             if (!any || !allDone) return;
 
-            _completedRaised = true;
             // 只报告，不停服务：停服务会导致仍在收尾的客户端卡死
             ReportLog("客户端任务全部结束（" + reason + "），服务保持运行，等待手动停止");
             RaiseCompleted(reason);
@@ -789,8 +789,15 @@ namespace Fwoign
             {
                 if (name == "bzImage" || name == "init.xz")
                 {
-                    if (method == "HEAD") { SendHead(ns, 200, "OK", 0, "application/octet-stream"); return; }
-                    SendFile(ns, Path.Combine(BootDir, name));
+                    string file = Path.Combine(BootDir, name);
+                    if (method == "HEAD")
+                    {
+                        long len = 0;
+                        try { if (File.Exists(file)) len = new FileInfo(file).Length; } catch { }
+                        SendHead(ns, 200, "OK", len, "application/octet-stream");
+                        return;
+                    }
+                    SendFile(ns, file);
                     return;
                 }
             }

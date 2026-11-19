@@ -25,12 +25,14 @@ namespace Fwoign
         private readonly FwoignServerController _srv = new FwoignServerController();
         private List<NetworkAdapter> _adapters = new List<NetworkAdapter>();
         private UiSettings _ui = new UiSettings();
+        private int _starting;         // 1=正在启动服务（Interlocked，防止连点）
         private int _ipApplying;       // 1=正在后台应用 IP（Interlocked，防止两个 netsh 打架）
         private DispatcherTimer _uiWatch;     // 每秒刷新客户端列表与日志
         private long _logPos;                 // 日志已读到的字节位置（增量读取）
         private string _logPath;              // 当前日志文件（跨天会变）
         private string _clientSig;            // 客户端列表内容指纹（没变就不重建）
-        private bool _shutdownStarted; // 退出收尾已开始（避免 OnClosing 反复拦截）
+        private bool _shutdownStarted;
+        private bool _shutdownCompleted;   // 收尾完成前，第二次点关闭一律取消 // 退出收尾已开始（避免 OnClosing 反复拦截）
 
         /// <summary>设置 IP 时固定使用该掩码（界面不再提供修改）。</summary>
         private const string FixedMask = "255.255.255.0";
@@ -167,7 +169,6 @@ namespace Fwoign
 
             // 引导方式 / 镜像格式 / 台数 / 完成后动作：一律用默认值，不记忆上次选择
             CbBootTarget.SelectedIndex = 0;
-            CbImgFormat.SelectedIndex = 0;        // 单文件（zstd）
             RbDoneRestart.IsChecked = true;       // 完成后重启
             NumCount.Value = 1;                   // 刻台数默认 1
             if (_ui.NetMode == 1) RbDhcpProxy.IsChecked = true; else RbDhcpFull.IsChecked = true;
@@ -365,11 +366,15 @@ namespace Fwoign
             // 点关闭时先不真关：把服务停掉、把 IP 还原完，再自己调 Close()。
             // 以前是在 OnClosed 里做，窗口已经消失、进程正在退出，netsh 那 1~2 秒
             // 用户看不到任何反应，容易被当成“没还原”。
-            if (!_shutdownStarted)
+            if (!_shutdownCompleted)
             {
-                _shutdownStarted = true;
+                // 收尾没做完之前，无论点多少次关闭都先取消（P1-13）
                 e.Cancel = true;
-                BeginShutdown();
+                if (!_shutdownStarted)
+                {
+                    _shutdownStarted = true;
+                    BeginShutdown();
+                }
                 return;
             }
             base.OnClosing(e);
@@ -393,7 +398,8 @@ namespace Fwoign
             Log.Detail("退出流程：保存配置");
             try { SaveUiSettings(); } catch { }
             Log.Detail("退出流程：停止 haneWIN / HTTP stub / TinyPXE 服务");
-            try { _srv.Stop(); } catch { }
+            // Kill 里要等待进程退出（最坏十几秒），放线程池执行，否则界面无响应
+            try { await Task.Run(delegate { try { _srv.Stop(); } catch { } }); } catch { }
 
             // 万一点关闭时“设置 IP”还没跑完，等它结束再判断，避免两个 netsh 打架
             for (int i = 0; i < 75 && Volatile.Read(ref _ipApplying) != 0; i++) await Task.Delay(200);
@@ -439,7 +445,8 @@ namespace Fwoign
             }
 
             Log.Detail("退出流程：收尾完成，关闭窗口");
-            Close();     // _shutdownStarted 已置位，这次会真正关闭
+            _shutdownCompleted = true;
+            Close();     // 标志已置位，这次会真正关闭
         }
     }
 }
