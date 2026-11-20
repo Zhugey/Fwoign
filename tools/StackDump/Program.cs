@@ -272,21 +272,25 @@ namespace StackDump
                             frame.Params = new ulong[4];
                             frame.Reserved = new ulong[3];
 
+                            // 三个委托必须提升为局部变量并保持存活：
+                            // 内联 new 出来的委托没有托管引用，GC 一跑函数指针就悬空（P2-23）
                             ReadProcessMemoryDelegate reader = ReadProcessMemory;
+                            FuncTableAccessDelegate fta = SymFunctionTableAccess64;
+                            GetModuleBaseDelegate gmb = SymGetModuleBase64;
+
+                            IntPtr pReader = Marshal.GetFunctionPointerForDelegate(reader);
+                            IntPtr pFta = Marshal.GetFunctionPointerForDelegate(fta);
+                            IntPtr pGmb = Marshal.GetFunctionPointerForDelegate(gmb);
 
                             for (int depth = 0; depth < 24; depth++)
                             {
                                 if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, hProcess, hThread, ref frame, ctx,
-                                                 Marshal.GetFunctionPointerForDelegate(reader),
-                                                 Marshal.GetFunctionPointerForDelegate(
-                                                     new FuncTableAccessDelegate(SymFunctionTableAccess64)),
-                                                 IntPtr.Zero,
-                                                 Marshal.GetFunctionPointerForDelegate(
-                                                     new GetModuleBaseDelegate(SymGetModuleBase64))))
+                                                 pReader, pFta, IntPtr.Zero, pGmb))
                                     break;
                                 if (frame.AddrPC.Offset == 0) break;
                                 sb.AppendLine("    " + Describe(hProcess, frame.AddrPC.Offset));
                             }
+                            GC.KeepAlive(reader); GC.KeepAlive(fta); GC.KeepAlive(gmb);
                         }
                         else
                         {

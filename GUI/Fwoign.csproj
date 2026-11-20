@@ -6,6 +6,8 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>Fwoign</AssemblyName>
+    <!-- 栈回溯与进程内存读取按 amd64 硬编码，避免 AnyCPU 在 32 位下偏移错位（P2-25） -->
+    <PlatformTarget>x64</PlatformTarget>
     <RootNamespace>Fwoign</RootNamespace>
     <LangVersion>7.3</LangVersion>
     <ApplicationManifest>app.manifest</ApplicationManifest>

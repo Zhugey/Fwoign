@@ -25,9 +25,11 @@ namespace Fwoign
         private readonly FwoignServerController _srv = new FwoignServerController();
         private List<NetworkAdapter> _adapters = new List<NetworkAdapter>();
         private UiSettings _ui = new UiSettings();
+        private bool _taskRunning;     // 服务是否处于「已启动」状态（按钮状态与异常退出检测都看它）
         private int _starting;         // 1=正在启动服务（Interlocked，防止连点）
         private int _ipApplying;       // 1=正在后台应用 IP（Interlocked，防止两个 netsh 打架）
-        private DispatcherTimer _uiWatch;     // 每秒刷新客户端列表与日志
+        private DispatcherTimer _uiWatch;
+        private bool _logReadError;   // 读日志出过错（只记一次）     // 每秒刷新客户端列表与日志
         private long _logPos;                 // 日志已读到的字节位置（增量读取）
         private string _logPath;              // 当前日志文件（跨天会变）
         private string _clientSig;            // 客户端列表内容指纹（没变就不重建）
@@ -61,6 +63,7 @@ namespace Fwoign
             FitToScreen();            // 先按屏幕可用区域收拢，再摆内容
             LoadAdapters();
             LoadUiSettings();
+            ApplyPaneHeights();       // 恢复上次拖动的「备份还原 / 日志」高度
             RefreshRestoreImageList();
             UpdateIpPanelState();
             UpdateBackupHint();
@@ -191,8 +194,53 @@ namespace Fwoign
                 _ui.NetMode == 1 ? "有路由器" : "纯交换机", _ui.Count, _ui.AutoRestart, _ui.AutoClose);
         }
 
+        /// <summary>
+        /// 应用「备份还原区 / 日志区」的高度：默认取最小高度，其余给客户端列表；
+        /// 若上次拖动过则用记住的值（并保证客户端区至少 150px）。
+        /// </summary>
+        private void ApplyPaneHeights()
+        {
+            if (RowTabs == null || RowLog == null) return;
+
+            const double tabsMin = 290, logMin = 130, clientMin = 150;
+            double tabs = _ui.TabsHeight <= 0 ? tabsMin : _ui.TabsHeight;
+            double log = _ui.LogHeight <= 0 ? logMin : _ui.LogHeight;
+            if (tabs < tabsMin) tabs = tabsMin;
+            if (log < logMin) log = logMin;
+
+            // 防止记忆值把客户端区挤没：窗口可用高度 - 两个固定区 - 两条分隔条 - 其余行
+            double avail = ActualHeight > 0 ? ActualHeight : 980;
+            double others = 0;
+            if (RootGrid != null && RootGrid.RowDefinitions.Count >= 8)
+            {
+                for (int i = 0; i < RootGrid.RowDefinitions.Count; i++)
+                {
+                    if (i == 2 || i == 4 || i == 6) continue;
+                    others += RootGrid.RowDefinitions[i].ActualHeight;
+                }
+            }
+            double maxFixed = avail - others - clientMin - 10;
+            if (tabs + log > maxFixed && maxFixed > tabsMin + logMin)
+            {
+                double over = tabs + log - maxFixed;
+                log = Math.Max(logMin, log - over);
+                if (tabs + log > maxFixed) tabs = Math.Max(tabsMin, maxFixed - log);
+            }
+
+            RowTabs.Height = new GridLength(tabs);
+            RowLog.Height = new GridLength(log);
+        }
+
+        /// <summary>保存前把当前实际高度写回配置。</summary>
+        private void CapturePaneHeights()
+        {
+            if (RowTabs != null && RowTabs.ActualHeight > 1) _ui.TabsHeight = Math.Round(RowTabs.ActualHeight);
+            if (RowLog != null && RowLog.ActualHeight > 1) _ui.LogHeight = Math.Round(RowLog.ActualHeight);
+        }
+
         private void SaveUiSettings()
         {
+            CapturePaneHeights();
             NetworkAdapter a = SelectedAdapter;
             if (a != null) _ui.AdapterName = a.Name;
             _ui.MyIp = (TxtMyIp.Text ?? "").Trim();
@@ -210,7 +258,7 @@ namespace Fwoign
             _ui.Save();
             Log.Detail("界面配置已保存：网卡={0}，本机IP={1}，网络={2}，台数={3}，镜像目录={4}，备份路径={5}",
                 _ui.AdapterName, _ui.MyIp, _ui.NetMode == 1 ? "有路由器" : "纯交换机",
-                _ui.Count, _ui.ImageFolder, "");
+                _ui.Count, _ui.ImageFolder, _ui.BackupFolder);
         }
 
         // ===== 运行时目录检查 =====

@@ -38,7 +38,12 @@ namespace Fwoign
             public double LastRawPct;        // 上次收到的「当前分区」百分比，用来识别分区切换
             public int PartIdx;              // 客户端当前处于第几个分区（0 基）
             public bool RawLogged;           // 是否已把首条原始状态串写进详细日志
+            public readonly List<double> SeenTotals = new List<double>();   // 出现过的分区总字节（按出现顺序）
             public DateTime Updated = DateTime.Now;
+            public DateTime StartedAt;       // 首次收到进度的时间（本机时钟，用于每秒刷新用时）
+            public double Bpm;               // 客户端上报的速率（字节/分钟）
+            public double CopiedBytes;       // 已拷贝字节
+            public double TotalBytes;        // 当前分区总量（字节）
         }
 
         private TcpListener _tcp;
@@ -138,6 +143,7 @@ namespace Fwoign
             ImageName = imageName;
             TaskType = "";
             _completedRaised = 0;
+            lock (_gate) _pendingDelete.Clear();      // 跨任务的待删名字必须清掉（P1-06）
             lock (_gate)
             {
                 _clients.Clear();
@@ -165,6 +171,17 @@ namespace Fwoign
         {
             _running = false;
             try { if (_tcp != null) _tcp.Stop(); } catch { }
+
+            // 关掉所有已接入的连接：Stop 之后不应该还有回调在跑（P2-09）
+            try
+            {
+                lock (_active)
+                {
+                    foreach (TcpClient c in _active) { try { c.Close(); } catch { } }
+                    _active.Clear();
+                }
+            }
+            catch { }
             _tcp = null;
             _sweep = null;
             _accept = null;
@@ -268,16 +285,17 @@ namespace Fwoign
                 // 不能按单播那套判"离线/断开"。只有长时间完全没消息才提示异常。
                 if (multicast)
                 {
-                    // 45 秒没有任何上报，基本可以认定这台机器掉了（断电/断网）。
-                    // 判成「已停止」而不是「无响应」：已停止是终态，界面不会一直挂着红字等结果。
-                    if (idle >= 45 && !IsTerminal(c.State))
+                    // 客户端 checkin 之后还要挂 NFS、擦盘、重建分区表，
+                    // 通常 1~2 分钟才会真正启动接收，这段静默是正常的（P1-04）。
+                    // 因此这里只标「无响应」，不动终态；真伪等发送结束后再评估。
+                    if (idle >= 45 && c.State != "无响应")
                     {
                         lock (_gate)
                         {
-                            c.State = "已停止";
-                            c.Result = "超过 45 秒无进度上报，判定失联（可能已断电或断网）";
+                            c.State = "无响应";
+                            c.Result = "多播进行中，超过 45 秒无进度上报（可能正在挂载/擦盘）";
                         }
-                        ReportLog(string.Format("客户端 {0} 超过 45 秒无上报，标记为已停止", c.Ip));
+                        ReportLog(string.Format("客户端 {0} 超过 45 秒无上报，标记为无响应（不判定失败）", c.Ip));
                         changed = true;
                     }
                     continue;
@@ -289,7 +307,11 @@ namespace Fwoign
                 // 这种情况必须判成失败，否则任务会一直挂着等一个永远不会来的回调。
                 if (mcastFinished && idle >= 20)
                 {
-                    bool nearlyDone = c.Percent >= 99.0;
+                    // 只有「最后一个分区也到 99% 以上」才算完成；
+                    // Percent 是当前分区的进度，直接用它会把「前一个分区刚满 100%」误判成完成（P1-03）
+                    int total = PartSizes != null ? PartSizes.Length : ImagePartCount;
+                    bool lastPart = total > 0 ? (c.PartIdx >= total - 1) : true;
+                    bool nearlyDone = lastPart && c.Percent >= 99.0 && !(Multicast != null && Multicast.IsFailed);
                     lock (_gate)
                     {
                         if (nearlyDone)
@@ -301,8 +323,10 @@ namespace Fwoign
                         else
                         {
                             c.State = "已停止";
-                            c.Result = string.Format(
-                                "多播已结束但未回报完成（最后进度 {0:0.0}%），该机可能中途断电或断网", c.Percent);
+                            c.Result = (Multicast != null && Multicast.IsFailed)
+                                ? "多播会话失败或被中途终止，本机未完成还原"
+                                : string.Format("多播已结束但未回报完成（最后进度 {0:0.0}%），该机可能中途断电或断网",
+                                    c.Percent);
                         }
                     }
                     ReportLog(nearlyDone
@@ -361,18 +385,56 @@ namespace Fwoign
         private static bool LooksComplete(string dir)
         {
             if (!Directory.Exists(dir)) return false;
+
             bool hasImg = false;
+            var imgs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
                 foreach (string f in Directory.GetFiles(dir))
                 {
                     string fn = Path.GetFileName(f);
+                    // 还有 .000 说明 partclone 正在写这个分区
                     if (fn.EndsWith(".000", StringComparison.OrdinalIgnoreCase)) return false;
-                    if (fn.EndsWith(".img", StringComparison.OrdinalIgnoreCase)) hasImg = true;
+                    if (fn.EndsWith(".img", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasImg = true;
+                        imgs.Add(fn.Substring(0, fn.Length - 4).ToLowerInvariant());
+                    }
                 }
             }
             catch { return false; }
-            return hasImg;
+
+            if (!hasImg) return false;
+
+            // 分区集合校验（P1-02）：分区切换的空窗期也能满足「有 .img、无 .000」，
+            // 只有镜像里记录的每个分区都有对应 .img，才算真的写完。
+            // d1.partitions 不存在时（老镜像/异常）退化为原判据，避免整个目录被判废。
+            try
+            {
+                string partsFile = Path.Combine(dir, "d1.partitions");
+                if (File.Exists(partsFile))
+                {
+                    int n = 0;
+                    foreach (string raw in File.ReadAllLines(partsFile))
+                    {
+                        string t = raw.Trim();
+                        if (t.Length == 0 || t.StartsWith("#")) continue;
+                        int i = t.IndexOf(" : ", StringComparison.Ordinal);
+                        if (i <= 0) continue;
+                        string dev = t.Substring(0, i);                 // /dev/nvme0n1p3
+                        int p = dev.LastIndexOf('p');
+                        if (p <= 0) continue;
+                        string num = dev.Substring(p + 1);
+                        if (num.Length == 0) continue;
+                        n++;
+                        if (!imgs.Contains("d1p" + num)) return false;
+                    }
+                    if (n > 0 && imgs.Count < n) return false;
+                }
+            }
+            catch { /* 读不了就按原判据 */ }
+
+            return true;
         }
 
         /// <summary>
@@ -496,6 +558,8 @@ namespace Fwoign
         }
 
         /// <summary>
+
+        /// <summary>
         /// 备份失败时删除这次产生的临时镜像目录（Images 下的 MAC 目录）。
         /// 还原任务不涉及（它只读镜像）。
         /// 删除失败（客户端仍在通过 NFS 写）就记进待删列表，由后台扫描线程重试。
@@ -595,14 +659,38 @@ namespace Fwoign
             var list = new List<ClientState>();
             lock (_gate)
             {
+                DateTime now = DateTime.Now;
                 foreach (ClientState c in _clients.Values)
                 {
-                    list.Add(new ClientState
+                    var copy = new ClientState
                     {
                         Ip = c.Ip, Mac = c.Mac, State = c.State, Result = c.Result,
                         Progress = c.Progress, Elapsed = c.Elapsed, Remaining = c.Remaining,
                         Percent = c.Percent, Updated = c.Updated
-                    });
+                    };
+
+                    // 用时/剩余在本地每秒重算：客户端 3 秒才上报一次，
+                    // 直接用上报值会让两列"跳 3 秒"（实测观感卡顿）
+                    if (c.StartedAt != default(DateTime) && !IsTerminal(c.State))
+                    {
+                        TimeSpan used = now - c.StartedAt;
+                        if (used.TotalSeconds < 0) used = TimeSpan.Zero;
+                        copy.Elapsed = string.Format("{0:00}:{1:00}:{2:00}",
+                            (int)used.TotalHours, used.Minutes, used.Seconds);
+
+                        if (c.Bpm > 1 && c.TotalBytes > c.CopiedBytes)
+                        {
+                            double sec = (c.TotalBytes - c.CopiedBytes) / c.Bpm * 60.0;
+                            if (sec > 0 && sec < 86400)
+                            {
+                                TimeSpan left = TimeSpan.FromSeconds(sec);
+                                copy.Remaining = string.Format("{0:00}:{1:00}:{2:00}",
+                                    (int)left.TotalHours, left.Minutes, left.Seconds);
+                            }
+                        }
+                    }
+
+                    list.Add(copy);
                 }
             }
             list.Sort(delegate (ClientState a, ClientState b) { return string.CompareOrdinal(a.Ip, b.Ip); });
@@ -665,6 +753,9 @@ namespace Fwoign
         // 没有上限的话线程池会被耗尽，正常请求也排不上队。
         private readonly SemaphoreSlim _connSlots = new SemaphoreSlim(64, 64);
 
+        // 活跃连接：Stop 时要把它们关掉，否则已经接入的请求还能继续跑（P2-09）
+        private readonly List<TcpClient> _active = new List<TcpClient>();
+
         private void AcceptLoop()
         {
             while (_running)
@@ -681,12 +772,15 @@ namespace Fwoign
                     continue;
                 }
 
+                lock (_active) _active.Add(client);
+
                 ThreadPool.QueueUserWorkItem(delegate
                 {
                     try { HandleClient(client); }
                     catch { }
                     finally
                     {
+                        lock (_active) _active.Remove(client);
                         try { client.Close(); } catch { }
                         _connSlots.Release();
                     }
@@ -722,6 +816,23 @@ namespace Fwoign
                     {
                         int.TryParse(lines[i].Substring(15).Trim(), out contentLength);
                     }
+                }
+
+                // body 上限 1MB：回调里最大的是 base64 的分区表，远小于这个值。
+                // 不限长的话一条 Content-Length: 999999999 就能把内存吃光（P2-08）
+                const int MaxBody = 1024 * 1024;
+                if (contentLength > MaxBody)
+                {
+                    string badIp = "";
+                    try
+                    {
+                        var bep = client.Client.RemoteEndPoint as IPEndPoint;
+                        if (bep != null) badIp = bep.Address.ToString();
+                    }
+                    catch { }
+                    ReportLog(string.Format("拒绝来自 {0} 的请求：body 过大（{1} 字节）", badIp, contentLength));
+                    SendText(ns, "payload too large", 413, "Payload Too Large");
+                    return;
                 }
 
                 string body = "";
@@ -761,8 +872,10 @@ namespace Fwoign
         {
             var buf = new List<byte>(1024);
             int state = 0;      // 匹配 \r\n\r\n
+            DateTime deadline = DateTime.Now.AddSeconds(10);   // 整段请求头的总时限（P2-08）
             while (buf.Count < 65536)
             {
+                if (DateTime.Now > deadline) return "";        // 慢连接直接放弃
                 int b = ns.ReadByte();
                 if (b < 0) break;
                 buf.Add((byte)b);
@@ -977,6 +1090,20 @@ namespace Fwoign
             c.Progress = prefix + totalText + "/" + totalText;
         }
 
+        /// <summary>
+        /// 按「分区设备字节首次出现的顺序」给分区编号，返回 0 基序号。
+        /// 容差 1MB：同一分区多次上报的数值一致，只有换分区才会变。
+        /// </summary>
+        private static int NotePartSize(ClientState c, double bytes)
+        {
+            for (int i = 0; i < c.SeenTotals.Count; i++)
+            {
+                if (Math.Abs(c.SeenTotals[i] - bytes) <= 1024.0 * 1024.0) return i;
+            }
+            c.SeenTotals.Add(bytes);
+            return c.SeenTotals.Count - 1;
+        }
+
         private void RecordClient(string ip, string mac, string state, string result, bool notify)
         {
             bool isNew = false;
@@ -985,6 +1112,12 @@ namespace Fwoign
             lock (_gate)
             {
                 ClientState c;
+                if (_clients.TryGetValue(ip, out c) && IsTerminal(c.State)
+                    && (state == "等待中" || state == "进行中"))
+                {
+                    // 终态不能被迟到的 Pre_Stage1 / 重复报到翻回未完成（P1-05）
+                    return;
+                }
                 if (!_clients.TryGetValue(ip, out c))
                 {
                     c = new ClientState { Ip = ip };
@@ -1060,6 +1193,8 @@ namespace Fwoign
             lock (_gate)
             {
                 ClientState c = GetOrCreate(ip, mac);
+                // 已经是终态的客户端，迟到的进度上报不能把它翻回「进行中」（P1-05）
+                if (IsTerminal(c.State)) return;
                 c.State = "进行中";
                 c.Result = "";        // 清掉上一次的结果提示（"等待完成回调"之类）
                 c.Elapsed = p[1];
@@ -1079,13 +1214,24 @@ namespace Fwoign
                 // 与镜像 d1.partitions 里的分区大小做匹配——这是精确的，不依赖百分比推断。
                 // 匹配不到（例如备份任务、或镜像没有 d1.partitions）时，退回「百分比大幅回落」的推断。
                 long[] layout = PartSizes;
-                int matched = MatchPartIndex(layout, p.Length > 6 ? p[6] : null);
+                double totalBytesOfPart = 0;
+                if (p.Length > 6)
+                    double.TryParse(p[6].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out totalBytesOfPart);
+
+                int matched = MatchPartIndex(layout, totalBytesOfPart.ToString("F0", CultureInfo.InvariantCulture));
                 if (matched < 0 && p.Length > 4)
                 {
-                    // 退一步：拿「当前分区总量」（第 5 字段，形如 13.70GiB）再匹配一次，
-                    // 防止某些 partclone 版本的 totalsize 不是设备字节而是数据量
+                    // 退一步：拿「当前分区总量」（第 5 字段，形如 13.70GiB）再匹配一次
                     double tb = ToBytes(p[4]);
                     if (tb > 0) matched = MatchPartIndex(layout, tb.ToString("F0", CultureInfo.InvariantCulture));
+                }
+
+                if (matched < 0 && totalBytesOfPart > 0)
+                {
+                    // 镜像分区表缺失/不一致时的兜底：按「设备字节首次出现的顺序」编号。
+                    // 每个分区的设备大小不同，出现一个新的 size 就说明进入了下一个分区，
+                    // 这比"百分比回落"可靠得多（实测 4 分区时回落判据会漏掉 1~2 次换区）。
+                    matched = NotePartSize(c, totalBytesOfPart);
                 }
 
                 if (matched >= 0)
@@ -1103,6 +1249,12 @@ namespace Fwoign
                     c.RawLogged = true;
                     try { Log.Detail("客户端 {0} 首条状态：{1}", ip, line); } catch { }
                 }
+                if (c.StartedAt == default(DateTime)) c.StartedAt = DateTime.Now;
+                // 第 1 字段是速率（形如 " 1.12GB"，单位是每分钟），转成字节/分钟
+                c.Bpm = ToBytes(p[0]);
+                c.CopiedBytes = ToBytes(p[3]);
+                c.TotalBytes = ToBytes(p[4]);
+
                 c.LastRawPct = pct;
                 c.Percent = pct;                 // 当前分区进度，0-100%
 
@@ -1201,18 +1353,29 @@ namespace Fwoign
                             // 目录大小连续两次不变 = 数据写完。
                             // 这里只标状态，不做重命名：重命名统一放到「停止服务」时做，
                             // 否则会在客户端还没收尾时就改掉目录名（实测就是这样）。
+                            // 只更新「目录名对应的那台客户端」。以前是不分归属，
+                            // 任何一个 12hex 目录稳定就把所有客户端判完成（P1-01）。
+                            bool hit = false;
                             lock (_gate)
                             {
                                 foreach (ClientState c in _clients.Values)
                                 {
-                                    if (c.State == "进行中" || c.State == "等待中" || c.State == "离线")
-                                    {
-                                        c.State = "已完成";
-                                        c.Result = "成功（停止服务时归档为镜像）";
-                                        NormalizeCompleted(c);
-                                        c.Updated = DateTime.Now;
-                                    }
+                                    string mac = (c.Mac ?? "").Replace(":", "").Replace("-", "").ToLowerInvariant();
+                                    if (mac != name.ToLowerInvariant()) continue;
+                                    if (IsTerminal(c.State)) { hit = true; break; }
+                                    c.State = "已完成";
+                                    c.Result = "成功（停止服务时归档为镜像）";
+                                    NormalizeCompleted(c);
+                                    c.Updated = DateTime.Now;
+                                    hit = true;
+                                    break;
                                 }
+                            }
+                            if (!hit)
+                            {
+                                // 没有归属客户端：上一轮的残留目录，不参与任何判定
+                                lock (_gate) _sweepLast.Remove(name);
+                                continue;
                             }
                             ReportLog(string.Format("备份数据已完整（{0:F1} GB），停止服务时归档为镜像 {1}",
                                 total / 1073741824.0, ImageName));

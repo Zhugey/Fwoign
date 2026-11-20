@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Text;
 
@@ -229,6 +230,8 @@ namespace Fwoign
         public int Count = 1;            // 刻台数
         public int Osid = 10;            // Windows 11 = 10，Win10 = 9
         public int ImgFormat = 5;        // 固定 5（zstd 单文件）；分片选项已移除
+        public double TabsHeight = 290;  // 「备份还原」区域高度（像素，用户拖过分隔条后记住）
+        public double LogHeight = 130;   // 「运行日志」区域高度
 
         private static string FilePath
         {
@@ -270,6 +273,8 @@ namespace Fwoign
                 s.Count = ParseInt(ini.Get("ui", "Count", "1"));
                 s.Osid = ParseInt(ini.Get("ui", "Osid", "10"));
                 s.ImgFormat = ParseInt(ini.Get("ui", "ImgFormat", "5"));
+                s.TabsHeight = ParseDouble(ini.Get("ui", "TabsHeight", "290"), 290);
+                s.LogHeight = ParseDouble(ini.Get("ui", "LogHeight", "130"), 130);
             }
             catch { }
             return s;
@@ -295,6 +300,8 @@ namespace Fwoign
                 ini.Set("ui", "Count", Count.ToString());
                 ini.Set("ui", "Osid", Osid.ToString());
                 ini.Set("ui", "ImgFormat", ImgFormat.ToString());
+                ini.Set("ui", "TabsHeight", TabsHeight.ToString("0", CultureInfo.InvariantCulture));
+                ini.Set("ui", "LogHeight", LogHeight.ToString("0", CultureInfo.InvariantCulture));
                 ini.Save();
             }
             catch { }
@@ -304,6 +311,13 @@ namespace Fwoign
         {
             int v;
             return int.TryParse(s, out v) ? v : 0;
+        }
+
+        private static double ParseDouble(string s, double def)
+        {
+            double d;
+            if (double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out d) && d > 0) return d;
+            return def;
         }
     }
 }

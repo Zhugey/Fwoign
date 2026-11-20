@@ -154,11 +154,18 @@ namespace Fwoign
                     // 形如: UDP    0.0.0.0:67    *:*    1234
                     if (!parts[0].Equals("UDP", StringComparison.OrdinalIgnoreCase)) continue;
                     if (!parts[1].EndsWith(suffix, StringComparison.Ordinal)) continue;
-                    if (parts[parts.Length - 1] != pid.ToString()) continue;
+
+                    // PID 按整数比较，避免 "1234" 与 "01234" 之类的字符串差异（P2-15）
+                    int rowPid;
+                    if (!int.TryParse(parts[parts.Length - 1], out rowPid) || rowPid != pid) continue;
 
                     int idx = parts[1].LastIndexOf(':');
                     if (idx <= 0) continue;
-                    return parts[1].Substring(0, idx);
+                    string ip = parts[1].Substring(0, idx);
+                    // 通配绑定（0.0.0.0 / :: / [::]）不能当成"绑到了某张网卡"，
+                    // 它其实表示"所有网卡"，继续找具体的那个（P2-15）
+                    if (ip == "0.0.0.0" || ip == "::" || ip == "[::]" || ip.Length == 0) continue;
+                    return ip;
                 }
             }
             catch { }
@@ -221,12 +228,25 @@ namespace Fwoign
             };
             using (Process p = Process.Start(psi))
             {
-                string output = p.StandardOutput.ReadToEnd();
+                // 先 ReadToEnd 再 WaitForExit：一旦子进程卡住不退出，
+                // 超时永远不会生效（读管道是阻塞的）（P2-14）。
+                // 改成异步读 + 有界等待。
+                var sb = new StringBuilder();
+                var done = new System.Threading.ManualResetEvent(false);
+                p.OutputDataReceived += delegate(object s2, DataReceivedEventArgs e2)
+                {
+                    if (e2.Data == null) { try { done.Set(); } catch { } return; }
+                    lock (sb) sb.AppendLine(e2.Data);
+                };
+                p.BeginOutputReadLine();
+
                 if (!p.WaitForExit(timeoutMs))
                 {
                     try { p.Kill(); } catch { }
+                    return "";
                 }
-                return output;
+                done.WaitOne(1000);      // 等最后几行读完
+                lock (sb) return sb.ToString().Trim();
             }
         }
     }

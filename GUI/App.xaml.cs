@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Reflection;
 using System.Windows;
+using hc = HandyControl.Controls;
 
 namespace Fwoign
 {
@@ -17,8 +18,41 @@ namespace Fwoign
             AppDomain.CurrentDomain.AssemblyResolve += ResolveFromLib;
         }
 
+        private static System.Threading.Mutex _single;
+
         protected override void OnStartup(StartupEventArgs e)
         {
+            // 单实例：两个实例会抢 80 端口并互相改写 exports/ipxe/config（P2-13）
+            bool created;
+            _single = new System.Threading.Mutex(true, "Fwoign_SingleInstance_9F1C", out created);
+            if (!created)
+            {
+                // 不能在这里直接 Show：此时 WPF 的消息循环还没跑起来，窗口显示不出来。
+                // 先置 OnExplicitShutdown 保住进程，再把"提示 + 退出"投到调度队列。
+                ShutdownMode = ShutdownMode.OnExplicitShutdown;
+                Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle,
+                    new Action(delegate
+                    {
+                        try
+                        {
+                            var dlg = new AlreadyRunningWindow();
+                            dlg.ShowDialog();
+                        }
+                        catch
+                        {
+                            // 兜底：连自绘窗口都起不来时，至少给一句系统提示
+                            try
+                            {
+                                MessageBox.Show("Fwoign 已经在运行，请不要重复启动。",
+                                    "Fwoign", MessageBoxButton.OK, MessageBoxImage.Warning);
+                            }
+                            catch { }
+                        }
+                        Shutdown();
+                    }));
+                return;
+            }
+
             // 全局异常兜底：4 个 async void 里抛出的异常以前会直接带走进程且无日志（P2-05）
             DispatcherUnhandledException += delegate(object s, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs args)
             {
@@ -38,6 +72,12 @@ namespace Fwoign
             };
 
             base.OnStartup(e);
+
+            // 主窗口在这里创建（App.xaml 已去掉 StartupUri）：
+            // 这样「第二个实例」不会因为 DoStartup 仍然按 StartupUri 建窗口而弹出重复界面。
+            var win = new MainWindow();
+            MainWindow = win;
+            win.Show();
         }
 
         private static Assembly ResolveFromLib(object sender, ResolveEventArgs args)

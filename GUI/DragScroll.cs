@@ -183,7 +183,13 @@ namespace Fwoign
             var st = fe == null ? null : fe.GetValue(StateProperty) as State;
             if (st == null) return;
 
-            st.Scroller.ScrollToVerticalOffset(st.Scroller.VerticalOffset - e.Delta);
+            // 按系统「每次滚动几行」换算，不再固定 120 像素（P2-22）
+            int lines = SystemParameters.WheelScrollLines;
+            double step = lines > 0 ? lines * 22.0 : st.Scroller.ViewportHeight * 0.9;
+            double target = st.Scroller.VerticalOffset + (e.Delta > 0 ? -step : step);
+            if (target < 0) target = 0;
+            if (target > st.Scroller.ScrollableHeight) target = st.Scroller.ScrollableHeight;
+            st.Scroller.ScrollToVerticalOffset(target);
             e.Handled = true;
         }
 

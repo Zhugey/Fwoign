@@ -134,6 +134,7 @@ namespace Fwoign
                 _srv.Start(isBackup, imageName, 0 /* 0 = 自动识别 */, _ui.ImgFormat,
                            target, proxyDhcp, poolStart, poolSize, serverIp, imagesDir, shutdownAfter,
                            multicast, expectedCount);
+                _taskRunning = true;      // 之后按钮状态以这个为准（HTTP 是进程内的，不能当依据）
                 Log.Info(string.Format("三服务已启动：haneWIN + HTTP stub + Tiny PXE，绑定 {0}，地址池 {1}/{2}，模式 {3}，镜像目录 {4}，完成后 {5}",
                     serverIp, poolStart, poolSize, proxyDhcp ? "ProxyDHCP" : "本机 DHCP", imagesDir,
                     shutdownAfter ? "关机" : "重启"));
@@ -206,7 +207,8 @@ namespace Fwoign
 
             if (!EnsureReady()) return;
 
-            int count = (int)Math.Round(NumCount.Value);
+            // 备份页没有台数控件，且备份不走多播：固定按 1 台处理（P2-19）
+            int count = 1;
 
             SaveUiSettings();
             ResetPanels();          // 新任务开始，清掉上一次的客户端与日志显示
@@ -260,6 +262,14 @@ namespace Fwoign
             StartServers(false, GetBootTarget(), imgName, imagesDir, count > 1, count);
         }
 
+        /// <summary>把「刻台数」恢复为 1 台（单播）。多播任务做完后一键回到常规状态。</summary>
+        private void BtnResetCount_Click(object sender, RoutedEventArgs e)
+        {
+            if (NumCount == null) return;
+            NumCount.Value = 1;
+            SetStatus("刻台数已重置为 1 台（单播还原）");
+        }
+
         private void BtnStop_Click(object sender, RoutedEventArgs e)
         {
             MessageBoxResult r = hc.MessageBox.Show(
@@ -274,6 +284,7 @@ namespace Fwoign
             bool wasMulticast = _srv.Mcast.IsRunning || _srv.Mcast.IsReleased;
 
             try { _srv.Stop(); } catch (Exception ex) { Log.Error("停止服务失败", ex); }
+            _taskRunning = false;
             _srv.Http.MarkRemainingStopped("服务被手动停止（客户端已中断）");
 
             if (BtnForceStart != null) BtnForceStart.IsEnabled = false;
@@ -413,8 +424,20 @@ namespace Fwoign
         {
             if (BtnStart == null) return;
 
-            bool running = _srv.IsRunning;
-            BtnStart.IsEnabled = !running;
+            // HTTP 是进程内的服务，"任一在跑"永远为真，不能用它判断任务是否还在。
+            // 以我们自己记录的任务状态 + 两个外部进程（haneWIN / TinyPXE）为准。
+            if (_taskRunning && (!_srv.IsNfsRunning || !_srv.IsPxeRunning))
+            {
+                _taskRunning = false;
+                string who = !_srv.IsNfsRunning ? "haneWIN NFS" : "Tiny PXE";
+                Log.Warn("检测到 {0} 已退出，任务状态改为已停止", who);
+                try { hc.Growl.Error("服务进程已意外退出：" + who + "\n任务已标记为停止，需要时请重新开始"); } catch { }
+                SetStatus("服务已停止（" + who + " 被结束）");
+            }
+
+            bool starting = Volatile.Read(ref _starting) != 0;
+            bool running = _taskRunning;
+            BtnStart.IsEnabled = !running && !starting;
             BtnStop.IsEnabled = running;
         }
 

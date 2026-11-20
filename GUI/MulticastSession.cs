@@ -129,7 +129,11 @@ namespace Fwoign
         /// <summary>出错（参数是原因）。</summary>
         public event Action<string> Failed;
 
+        private int _runId;                 // 会话代际：旧 Run 醒来时用它判断自己是滞的（P1-08）
+        private volatile bool _failed;      // 本会话是否已失败（供上层判定用）
+
         public bool IsRunning { get { return _running; } }
+        public bool IsFailed { get { return _failed; } }
         public int Expected { get { lock (_gate) return _expected; } }
         public int Arrived { get { lock (_gate) return _members.Count; } }
         public bool IsReleased { get { lock (_gate) return _released; } }
@@ -157,16 +161,27 @@ namespace Fwoign
             // 不做限速：实测 2 台多播稳定 10.5 MB/s，限速器只在排查阶段用过，已随界面一起移除。
             // RateBytesPerSec 保留为 0，喂流线程按「能写多快写多快」运行。
 
+            // 上一轮的 Run 可能还停在 Sleep 里，先让它彻底退出再开新会话
+            Thread old = _runner;
+            _running = false;
+            if (old != null) { try { old.Join(1500); } catch { } }
+
+            int id;
             lock (_gate)
             {
                 _members.Clear();
                 _expected = Math.Max(2, expectedCount);
                 _forceStart = false;
                 _released = false;
+                _failed = false;
+                _partSizes = null;
+                _partCount = 0;
+                _partIndex = 0;
+                id = ++_runId;
             }
             _running = true;
 
-            _runner = new Thread(Run) { IsBackground = true, Name = "FwoignMcast" };
+            _runner = new Thread(delegate() { Run(id); }) { IsBackground = true, Name = "FwoignMcast" };
             _runner.Start();
         }
 
@@ -175,6 +190,15 @@ namespace Fwoign
             _running = false;
             try { if (_sender != null && !_sender.HasExited) _sender.Kill(); } catch { }
             _sender = null;
+
+            // 会话结束后必须清掉放行标记：否则老成员永远拿 ##@GO，新成员永远被拒（P1-10）
+            lock (_gate)
+            {
+                _released = false;
+                _members.Clear();
+            }
+            try { Thread old = _runner; if (old != null) old.Join(1500); } catch { }
+            _runner = null;
         }
 
         /// <summary>本次任务的分区大小（按发送顺序）；未开始或多分区信息缺失时返回 null。</summary>
@@ -231,8 +255,9 @@ namespace Fwoign
             {
                 if (_released)
                 {
-                    // 已放行：老成员一律放行（重试可能重复到达），新成员拒绝
-                    if (_members.ContainsKey(key))
+                    // 已放行且发送端还在跑：老成员重试一律放行
+                    // 发送端已经结束/失败：不能再回 ##@GO，否则客户端会去等一个不存在的流（P1-10）
+                    if (_members.ContainsKey(key) && _running)
                         return new CheckinResult { Reply = "##@GO", Admitted = true };
                     // 英文提示：FOS 是纯 ASCII 控制台，中文会渲染成方块
                     return new CheckinResult
@@ -296,13 +321,13 @@ namespace Fwoign
 
         // ===== 后台发送流程 =====
 
-        private void Run()
+        private void Run(int runId)
         {
             try
             {
                 // 1) 等到齐或强制开始（无超时，符合要求）
-                while (_running && !IsReleased) Thread.Sleep(300);
-                if (!_running) return;
+                while (_running && !IsReleased && runId == _runId) Thread.Sleep(300);
+                if (!_running || runId != _runId) return;
 
                 // 2) 扫描镜像分区
                 List<PartGroup> parts = ScanPartitions();
@@ -327,7 +352,7 @@ namespace Fwoign
                 // 3) 按分区顺序依次发送
                 for (int i = 0; i < parts.Count; i++)
                 {
-                    if (!_running) return;
+                    if (!_running || runId != _runId) return;
                     PartGroup p = parts[i];
                     lock (_gate)
                     {
@@ -340,7 +365,7 @@ namespace Fwoign
 
                     RaiseDetail(string.Format("发送 {0}（{1}/{2}，{3:F2} GB）",
                         p.Stem, i + 1, parts.Count, p.Size / 1073741824.0));
-                    if (!SendOne(p)) return;
+                    if (!SendOne(p, i == 0)) return;
                 }
 
                 if (!_running) return;
@@ -430,7 +455,7 @@ namespace Fwoign
         /// 还要挂 NFS、擦盘、重建分区表，通常 1~2 分钟才会启动 udp-receiver。
         /// 所以这里必须循环重试，直到客户端进入接收状态。
         /// </summary>
-        private bool SendOne(PartGroup p)
+        private bool SendOne(PartGroup p, bool firstPartition)
         {
             if (string.IsNullOrEmpty(SenderExe) || !File.Exists(SenderExe))
             {
@@ -473,13 +498,17 @@ namespace Fwoign
                     // 真正拉起 udp-receiver 需要十几秒。原来的「退出→重试」会让已经连上
                     // 的客户端流被中断（实测：21:43 那次客户端因此 partclone 读流失败，
                     // 报 read ERROR: No such file or directory）。改成等 2 分钟不退出。
-                    + "--max-wait 120 "
+                    + "--max-wait {3} "
                     // 客户端突然断电/断网时，发送端会一直等它的回执，整条流跟着停。
                     // 连续 20 次重传仍无应答就踢掉它，剩余客户端继续跑完。
                     // （曾经试过 10：会话刚建立时客户端还没来得及回第一个切片就被踢，
                     // 太激进；20 次在启动阶段足够稳妥，断电场景仍然几秒内清掉）
                     + "--retries-until-drop 20",
-                    _portBase, receivers, RdvAddress);
+                    _portBase, receivers, RdvAddress,
+                    // 第一个分区等 120 秒（客户端刚从 checkin 过来，拉起 udp-receiver 需要时间）；
+                    // 之后的分区最多等 15 秒：掉线的客户端永远不会回来，
+                    // 用 120 秒会让整队白等 2 分钟（实测：C 盘完成→D 盘开始之间卡了 2 分钟）
+                    firstPartition ? 120 : 15);
 
                 int attempt = 0;
                 DateTime waitSince = DateTime.Now;
@@ -702,6 +731,10 @@ namespace Fwoign
             }) { IsBackground = true };
             errPump.Start();
 
+            // 注意：进程被 Stop 里的 Kill 结束时会立刻退出，
+            // WaitForExit 返回 true → 循环体根本不执行 → 下面读到的退出码是非 0，
+            // 于是手动停止被误报成「多播失败」（P1-09）。
+            // 所以循环结束后必须再判一次 _running。
             while (!proc.WaitForExit(2000))
             {
                 if (!_running)
@@ -720,6 +753,15 @@ namespace Fwoign
                     _lastAlive = DateTime.Now;
                     RaiseDetail(string.Format("发送端仍在运行（{0}，已发送 {1}）", stem, FormatBytes(SentBytes)));
                 }
+            }
+
+            // 被「停止」杀掉的进程一定算 Stopped，不看退出码（P1-09）
+            if (!_running)
+            {
+                _sender = null;
+                try { proc.Dispose(); } catch { }
+                RaiseLog("已手动停止发送 " + stem);
+                return SendOutcome.Stopped;
             }
 
             int code = 0;
@@ -1037,6 +1079,7 @@ namespace Fwoign
         private void Fail(string why)
         {
             _running = false;
+            _failed = true;
             RaiseLog("多播失败：" + why);
             Action<string> h = Failed;
             if (h != null) { try { h(why); } catch { } }

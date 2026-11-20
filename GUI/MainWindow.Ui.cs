@@ -155,7 +155,41 @@ namespace Fwoign
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // 每秒都会走到这里，只在第一次记录，避免刷屏（P2-21）
+                if (!_logReadError)
+                {
+                    _logReadError = true;
+                    Log.Warn("读取任务日志失败：" + ex.Message);
+                }
+            }
+        }
+
+        private void ListClients_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            FitResultColumn();
+        }
+
+        /// <summary>
+        /// 「结果」列宽度 = 列表可用宽度 − 其余各列宽度。
+        /// GridViewColumn 不支持星号宽度，只能在尺寸变化时手算（窗口拉宽，结果列跟着变宽）。
+        /// </summary>
+        private void FitResultColumn()
+        {
+            if (ListClients == null) return;
+            GridView gv = ListClients.View as GridView;
+            if (gv == null || gv.Columns.Count == 0) return;
+
+            double others = 0;
+            for (int i = 0; i < gv.Columns.Count - 1; i++) others += gv.Columns[i].Width;
+
+            // 26 ≈ 竖向滚动条 + 边框 + 单元格左右内边距
+            double avail = ListClients.ActualWidth - others - 26;
+            if (avail < 180) avail = 180;
+
+            GridViewColumn last = gv.Columns[gv.Columns.Count - 1];
+            if (Math.Abs(last.Width - avail) > 0.5) last.Width = avail;
         }
 
         /// <summary>把内置 HTTP 服务里的客户端状态搬到表格上。</summary>
@@ -187,9 +221,12 @@ namespace Fwoign
             }
 
             var sb = new StringBuilder();
+            // 签名必须覆盖所有会变的列，否则「耗时/剩余」永远不刷新（P2-16）
             foreach (ClientRow r in rows)
                 sb.Append(r.Ip).Append('|').Append(r.State).Append('|')
-                  .Append(r.PercentText).Append('|').Append(r.Result).Append(';');
+                  .Append(r.PercentText).Append('|').Append(r.ProgressText).Append('|')
+                  .Append(r.Elapsed).Append('|').Append(r.Remaining).Append('|')
+                  .Append(r.Result).Append(';');
             string sig = sb.ToString();
             if (sig == _clientSig) return;      // 内容没变就不重建，避免列表闪烁
             _clientSig = sig;
@@ -200,14 +237,25 @@ namespace Fwoign
         /// 每秒刷新多播状态。只在「等待成员」阶段改状态栏；
         /// 进入发送后不再写状态栏（发送进度本身不可靠，写上去只会误导）。
         /// </summary>
+        private int _lastMcastArrived = -1;   // 上次写状态栏时的到齐台数
+
         private void UpdateMcastStatus()
         {
             MulticastSession mc = _srv.Mcast;
-            if (!mc.IsRunning) return;
-            if (mc.IsReleased) return;
+            if (!mc.IsRunning || mc.IsReleased)
+            {
+                _lastMcastArrived = -1;
+                return;
+            }
+
+            // 只有到齐台数变化时才写状态栏：每秒覆盖会把「PXE 绑定校验」等
+            // 一次性提示冲掉（P2-17）
+            int arrived = mc.Arrived;
+            if (arrived == _lastMcastArrived) return;
+            _lastMcastArrived = arrived;
 
             SetStatus(string.Format("多播等待中：已到 {0}/{1} 台，可点「直接开始」不等剩余客户端",
-                mc.Arrived, mc.Expected));
+                arrived, mc.Expected));
         }
 
         private void UiWatch_Tick(object sender, EventArgs e)
@@ -215,6 +263,7 @@ namespace Fwoign
             RefreshClients();
             RefreshLog();
             UpdateMcastStatus();
+            UpdateRunState();      // 服务进程若自己退出，按钮状态要跟着变（P2-18）
         }
 
         /// <summary>每秒刷新一次客户端列表和运行日志。</summary>

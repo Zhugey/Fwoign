@@ -1,0 +1,35 @@
+<Window x:Class="Fwoign.AlreadyRunningWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Fwoign 已在运行"
+        Width="420" SizeToContent="Height"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        FontFamily="Microsoft YaHei"
+        Background="{DynamicResource RegionBrush}">
+    <Border Margin="16" Padding="20,18,20,16" CornerRadius="6"
+            Background="White" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+        <StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                <TextBlock Text="&#xE7BA;" FontFamily="Segoe MDL2 Assets" FontSize="20"
+                           Foreground="#D19A00" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                <TextBlock Text="Fwoign 已经在运行" FontSize="15" FontWeight="SemiBold"
+                           VerticalAlignment="Center"/>
+            </StackPanel>
+
+            <TextBlock TextWrapping="Wrap" FontSize="12.5" Foreground="#57606A" LineHeight="20">
+                请不要重复启动。两个实例会争抢 80 端口和共享配置（exports / iPXE 脚本 / config.ini），
+                导致网刻任务异常。
+            </TextBlock>
+
+            <TextBlock TextWrapping="Wrap" FontSize="12.5" Foreground="#57606A" Margin="0,8,0,0" LineHeight="20">
+                请切换到已经打开的那个窗口继续操作。
+            </TextBlock>
+
+            <Button x:Name="BtnOk" Content="知道了" Width="96" Height="32" Margin="0,18,0,0"
+                    HorizontalAlignment="Right" IsDefault="True" IsCancel="True"
+                    Click="BtnOk_Click"/>
+        </StackPanel>
+    </Border>
+</Window>

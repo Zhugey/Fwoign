@@ -9,6 +9,7 @@
     python sym2func.py <exe 路径>              # 交互：逐行输入 0x5602
     python sym2func.py <exe 路径> stack.txt    # 直接把 dump 文件里的偏移全部标注
 """
+import os
 import struct
 import sys
 
@@ -37,11 +38,15 @@ def load_symbols(path):
 
     syms = []
     off = ptr_sym
-    for _ in range(num_sym):
+    table_end = ptr_sym + num_sym * 18      # 符号表总长度（Number​OfSymbols 含 aux 记录）
+    # 每轮要跳过 aux 记录，所以不能用 range(num_sym)——那样会越过表尾（P2-24）
+    while off + 18 <= table_end and off + 18 <= len(data):
         name_raw = data[off:off + 8]
         value, sec_no, typ, storage, naux = struct.unpack_from('<IhHBB', data, off + 8)
         aux = naux
         off += 18 + aux * 18
+        if off > len(data):
+            break
         if sec_no <= 0 or sec_no > len(sections):
             continue
         if not (typ & 0x20):          # 0x20 = 函数
@@ -86,7 +91,9 @@ def main():
         import re
         with open(sys.argv[2], 'r', encoding='utf-8', errors='replace') as f:
             for line in f:
-                m = re.search(r'udp-sender\.exe\+0x([0-9a-fA-F]+)', line)
+                mod = re.escape(os.path.basename(sys.argv[1]))
+                m = re.search(mod + r'\+0x([0-9a-fA-F]+)', line) or \
+                    re.search(r'\+0x([0-9a-fA-F]+)', line)
                 if m:
                     rva = int(m.group(1), 16)
                     print(line.rstrip() + '    <<< ' + resolve(syms, rva))
