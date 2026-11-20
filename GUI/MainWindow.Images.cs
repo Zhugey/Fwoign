@@ -41,7 +41,7 @@ namespace Fwoign
         {
             why = null;
             if (string.IsNullOrWhiteSpace(s)) { why = "镜像名不能为空。"; return false; }
-            if (s.Length > 64) { why = "镜像名太长（最多 64 个字符）。"; return false; }
+            if (s.Length > Tuning.ImageMaxNameLength) { why = string.Format("镜像名太长（最多 {0} 个字符）。", Tuning.ImageMaxNameLength); return false; }
             // "." / ".." / ".xxx" 会把归档路径指到镜像库之外，一律禁止
             if (s == "." || s == ".." || s.StartsWith(".", StringComparison.Ordinal))
             {

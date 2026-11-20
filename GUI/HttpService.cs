@@ -120,6 +120,7 @@ namespace Fwoign
         /// <summary>来源网段校验：只接受与本机同一 /24 的客户端（P0 防护的①）。</summary>
         private bool IsAllowedClient(string ip)
         {
+            if (!Tuning.HttpSameSubnetOnly) return true;
             if (string.IsNullOrEmpty(ServerIp) || string.IsNullOrEmpty(ip)) return true;
             if (ip == "127.0.0.1" || ip == "::1") return true;
 
@@ -149,6 +150,9 @@ namespace Fwoign
                 _clients.Clear();
                 _sweepLast.Clear();
             }
+
+            // 并发上限按配置重建（SemaphoreSlim 只能构造时指定初值）
+            _connSlots = new SemaphoreSlim(Tuning.HttpMaxConnections, Tuning.HttpMaxConnections);
 
             _tcp = new TcpListener(IPAddress.Any, port);
             _tcp.Start();
@@ -263,7 +267,7 @@ namespace Fwoign
                 foreach (ClientState c in _clients.Values)
                 {
                     if (IsTerminal(c.State)) continue;
-                    if ((now - c.Updated).TotalSeconds < 10) continue;
+                    if ((now - c.Updated).TotalSeconds < Tuning.DetectOfflineIdle) continue;
                     pending.Add(c);
                 }
             }
@@ -275,7 +279,7 @@ namespace Fwoign
                 // 备份：目录里已经没有 .000 残留，说明数据写完了，可以收尾。
                 // 但要等得更久一些（30 秒）：客户端在收尾阶段还会对镜像目录做 chmod，
                 // 抢在它前面重命名会"访问被拒绝"，也会让它后面的回调落空。
-                if ((DateTime.Now - c.Updated).TotalSeconds >= 30 && TrySalvageCapture(c))
+                if ((DateTime.Now - c.Updated).TotalSeconds >= Tuning.DetectSalvageIdle && TrySalvageCapture(c))
                 { changed = true; salvaged = true; continue; }
 
                 // 注意：标记状态时不更新 Updated，否则超时计时会一直重置，永远判不了死。
@@ -288,7 +292,7 @@ namespace Fwoign
                     // 客户端 checkin 之后还要挂 NFS、擦盘、重建分区表，
                     // 通常 1~2 分钟才会真正启动接收，这段静默是正常的（P1-04）。
                     // 因此这里只标「无响应」，不动终态；真伪等发送结束后再评估。
-                    if (idle >= 45 && c.State != "无响应")
+                    if (idle >= Tuning.DetectMulticastNoResponse && c.State != "无响应")
                     {
                         lock (_gate)
                         {
@@ -305,13 +309,13 @@ namespace Fwoign
                 // 但要分清两种静默：进度已到 100%（写盘收尾中）才算完成；
                 // 进度明显没到就静默，说明它中途断电/断网（发送端刚把它剔除），
                 // 这种情况必须判成失败，否则任务会一直挂着等一个永远不会来的回调。
-                if (mcastFinished && idle >= 20)
+                if (mcastFinished && idle >= Tuning.DetectMulticastFinishIdle)
                 {
                     // 只有「最后一个分区也到 99% 以上」才算完成；
                     // Percent 是当前分区的进度，直接用它会把「前一个分区刚满 100%」误判成完成（P1-03）
                     int total = PartSizes != null ? PartSizes.Length : ImagePartCount;
                     bool lastPart = total > 0 ? (c.PartIdx >= total - 1) : true;
-                    bool nearlyDone = lastPart && c.Percent >= 99.0 && !(Multicast != null && Multicast.IsFailed);
+                    bool nearlyDone = lastPart && c.Percent >= Tuning.DetectMulticastDonePercent && !(Multicast != null && Multicast.IsFailed);
                     lock (_gate)
                     {
                         if (nearlyDone)
@@ -337,7 +341,7 @@ namespace Fwoign
                 }
 
                 // 单播：进度已到 100%，只是收尾回调没来（FOS 的 chmod / 回调可能拖很久）
-                if (c.Percent >= 99.9 && idle >= 15)
+                if (c.Percent >= Tuning.DetectUnicastDonePercent && idle >= Tuning.DetectUnicastDoneIdle)
                 {
                     lock (_gate)
                     {
@@ -751,7 +755,7 @@ namespace Fwoign
 
         // 并发上限：客户端异常时会长期占住线程（ReceiveTimeout 30 秒），
         // 没有上限的话线程池会被耗尽，正常请求也排不上队。
-        private readonly SemaphoreSlim _connSlots = new SemaphoreSlim(64, 64);
+        private SemaphoreSlim _connSlots = new SemaphoreSlim(64, 64);
 
         // 活跃连接：Stop 时要把它们关掉，否则已经接入的请求还能继续跑（P2-09）
         private readonly List<TcpClient> _active = new List<TcpClient>();
@@ -790,8 +794,8 @@ namespace Fwoign
 
         private void HandleClient(TcpClient client)
         {
-            client.ReceiveTimeout = 30000;
-            client.SendTimeout = 120000;
+            client.ReceiveTimeout = Tuning.HttpReceiveTimeoutSec * 1000;
+            client.SendTimeout = Tuning.HttpSendTimeoutSec * 1000;
 
             using (NetworkStream ns = client.GetStream())
             {
@@ -820,7 +824,7 @@ namespace Fwoign
 
                 // body 上限 1MB：回调里最大的是 base64 的分区表，远小于这个值。
                 // 不限长的话一条 Content-Length: 999999999 就能把内存吃光（P2-08）
-                const int MaxBody = 1024 * 1024;
+                int MaxBody = Tuning.HttpMaxBodyKB * 1024;
                 if (contentLength > MaxBody)
                 {
                     string badIp = "";
@@ -872,7 +876,7 @@ namespace Fwoign
         {
             var buf = new List<byte>(1024);
             int state = 0;      // 匹配 \r\n\r\n
-            DateTime deadline = DateTime.Now.AddSeconds(10);   // 整段请求头的总时限（P2-08）
+            DateTime deadline = DateTime.Now.AddSeconds(Tuning.HttpHeaderTimeoutSec);   // 整段请求头的总时限（P2-08）
             while (buf.Count < 65536)
             {
                 if (DateTime.Now > deadline) return "";        // 慢连接直接放弃
@@ -1314,7 +1318,7 @@ namespace Fwoign
             while (_running && gen == _generation)
             {
                 // 1 秒粒度等 8 秒：Stop 后能很快退出
-                for (int i = 0; i < 8 && _running && gen == _generation; i++) Thread.Sleep(1000);
+                for (int i = 0; i < Tuning.DetectSweepInterval && _running && gen == _generation; i++) Thread.Sleep(1000);
                 if (!_running || gen != _generation) break;
 
                 // 删除上轮没删掉的失败备份目录（客户端释放 NFS 句柄后就能删了）

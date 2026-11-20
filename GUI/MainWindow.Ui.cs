@@ -271,7 +271,7 @@ namespace Fwoign
         {
             if (_uiWatch == null)
             {
-                _uiWatch = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+                _uiWatch = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(Tuning.UiTickMs) };
                 _uiWatch.Tick += UiWatch_Tick;
             }
 

@@ -158,8 +158,9 @@ namespace Fwoign
             ImageName = imageName;
             ServerIp = serverIp;
 
-            // 不做限速：实测 2 台多播稳定 10.5 MB/s，限速器只在排查阶段用过，已随界面一起移除。
-            // RateBytesPerSec 保留为 0，喂流线程按「能写多快写多快」运行。
+            // 端口基数固定 9000：它必须与客户端接收参数一致，改动需要动客户端引导，
+            // 本项目坚持原版 FOS，所以不开放到配置文件。限速可配。
+            RateBytesPerSec = Tuning.McastRateLimitMBps * 1024L * 1024L;
 
             // 上一轮的 Run 可能还停在 Sleep 里，先让它彻底退出再开新会话
             Thread old = _runner;
@@ -490,7 +491,7 @@ namespace Fwoign
                 //                    一旦把客户端缓冲灌满就永久停住（表现为卡在 4~7%）。
                 //                    改成「按设定速率喂」，从源头上不给它灌满的机会。
                 string args = string.Format(CultureInfo.InvariantCulture,
-                    "--portbase {0} --ttl 32 --nokbd "
+                    "--portbase {0} --ttl {4} --nokbd "
                     + "--nopointopoint --full-duplex "
                     + "--min-receivers {1} "
                     + "--mcast-rdv-address {2} "
@@ -503,12 +504,13 @@ namespace Fwoign
                     // 连续 20 次重传仍无应答就踢掉它，剩余客户端继续跑完。
                     // （曾经试过 10：会话刚建立时客户端还没来得及回第一个切片就被踢，
                     // 太激进；20 次在启动阶段足够稳妥，断电场景仍然几秒内清掉）
-                    + "--retries-until-drop 20",
+                    + "--retries-until-drop {5}",
                     _portBase, receivers, RdvAddress,
                     // 第一个分区等 120 秒（客户端刚从 checkin 过来，拉起 udp-receiver 需要时间）；
                     // 之后的分区最多等 15 秒：掉线的客户端永远不会回来，
                     // 用 120 秒会让整队白等 2 分钟（实测：C 盘完成→D 盘开始之间卡了 2 分钟）
-                    firstPartition ? 120 : 15);
+                    firstPartition ? Tuning.McastMaxWaitFirst : Tuning.McastMaxWaitNext,
+                    Tuning.McastTtl, Tuning.McastRetriesUntilDrop);
 
                 int attempt = 0;
                 DateTime waitSince = DateTime.Now;

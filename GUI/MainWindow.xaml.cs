@@ -42,6 +42,7 @@ namespace Fwoign
         public MainWindow()
         {
             Log.Init();               // 先建日志，后面的初始化步骤才会按顺序记进详细日志
+            Tuning.Load();            // 读取 config\tuning.ini（不存在则生成带注释的默认模板）
 
             try
             {
@@ -50,6 +51,10 @@ namespace Fwoign
             }
             catch { }
             InitializeComponent();
+
+            // 任务栏/标题栏图标取自 exe 内嵌的 app.ico（与 csproj 的 ApplicationIcon 同一份）
+            try { Icon = new System.Windows.Media.Imaging.BitmapImage(new Uri("pack://application:,,,/app.ico")); }
+            catch { }
 
             // 标题必须在 InitializeComponent 之后再设：XAML 里的 Title 会覆盖先前的赋值
             try
@@ -364,7 +369,7 @@ namespace Fwoign
         {
             // 默认（拿不到 IP 时）按“服务器 .1”处理
             start = "192.168.2.2";
-            size = 253;
+            size = Tuning.NetPoolSize;
 
             if (!IsValidIp(ip)) return;
 

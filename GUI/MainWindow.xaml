@@ -13,6 +13,22 @@
         Background="{DynamicResource RegionBrush}">
 
     <Window.Resources>
+        <!-- 区域之间的分隔条：平时透明看不见，鼠标移上去才显一条浅色，拖动照旧 -->
+        <Style x:Key="QuietSplitter" TargetType="GridSplitter">
+            <Setter Property="Height" Value="5"/>
+            <Setter Property="HorizontalAlignment" Value="Stretch"/>
+            <Setter Property="ResizeDirection" Value="Rows"/>
+            <Setter Property="ResizeBehavior" Value="PreviousAndNext"/>
+            <Setter Property="ShowsPreview" Value="False"/>
+            <Setter Property="Cursor" Value="SizeNS"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#D9E0E9"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
         <!-- 标签行右侧的“开始”按钮：绿色 -->
         <Style x:Key="ActionStartStyle" TargetType="Button">
             <Setter Property="Background" Value="#1B9C4B"/>
@@ -362,9 +378,7 @@
         </Grid>
 
         <!-- 拖动条：功能区 / 客户端 -->
-        <GridSplitter Grid.Row="3" Height="5" HorizontalAlignment="Stretch"
-                      ResizeDirection="Rows" ResizeBehavior="PreviousAndNext"
-                      Background="#E6EAF0" ShowsPreview="False" Cursor="SizeNS"/>
+        <GridSplitter Grid.Row="3" Style="{StaticResource QuietSplitter}"/>
 
         <!-- 客户端（高度可拖） -->
         <DockPanel Grid.Row="4">
@@ -516,9 +530,7 @@
             </DockPanel>
 
         <!-- 拖动条：客户端 / 日志 -->
-        <GridSplitter Grid.Row="5" Height="5" HorizontalAlignment="Stretch"
-                      ResizeDirection="Rows" ResizeBehavior="PreviousAndNext"
-                      Background="#E6EAF0" ShowsPreview="False" Cursor="SizeNS"/>
+        <GridSplitter Grid.Row="5" Style="{StaticResource QuietSplitter}"/>
 
         <!-- 运行日志（高度可拖） -->
             <DockPanel Grid.Row="6">

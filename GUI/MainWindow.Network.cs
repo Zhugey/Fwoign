@@ -127,7 +127,7 @@ namespace Fwoign
                 await System.Threading.Tasks.Task.Run(delegate
                 {
                     HardwareInfo.SetStaticIp(connName, want, mask);
-                    HardwareInfo.WaitForIp(connName, want, 8000);
+                    HardwareInfo.WaitForIp(connName, want, Tuning.NetWaitIpMs);
                 });
             }
             finally

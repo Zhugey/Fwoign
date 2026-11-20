@@ -522,7 +522,7 @@ namespace Fwoign
                     if (pid > 0) KillTree(pid, name);
                     else p.Kill();
 
-                    if (!p.WaitForExit(5000))
+                    if (!p.WaitForExit(Tuning.ProcKillWaitMs))
                     {
                         Log.Warn("{0} 未在 5 秒内退出", name);
                         try { p.Kill(); } catch { }

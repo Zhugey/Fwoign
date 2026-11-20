@@ -66,6 +66,7 @@ namespace Fwoign
             bool proxyDhcp = RbDhcpProxy.IsChecked == true;
             bool rebootAfter = RbDoneRestart.IsChecked == true;
             bool shutdownAfter = RbDoneShutdown.IsChecked == true;
+            Tuning.LogEffective();
             Log.Detail("开始启动服务：网络={0}，引导={1}，任务={2}，镜像={3}",
                 proxyDhcp ? "有路由器（ProxyDHCP）" : "纯交换机（本机 DHCP）",
                 target, isBackup ? "备份" : "还原", imageName);
@@ -128,6 +129,7 @@ namespace Fwoign
             string poolStart;
             int poolSize;
             ComputePool(serverIp, out poolStart, out poolSize);
+            if (poolSize > Tuning.NetPoolSize) poolSize = Tuning.NetPoolSize;   // 配置里的地址池上限
 
             try
             {
