@@ -1,0 +1,94 @@
+{
+  "说明": "Fwoign 运行所需的第三方文件清单。这些文件不随仓库或发行包分发，需使用者自行获取。",
+  "版本": "1.0.0",
+  "目录": {
+    "Boot": {
+      "用途": "PXE/iPXE 引导文件与 FOS 内核；程序会把它作为 Tiny PXE 的 TFTP 根目录",
+      "文件": [
+        {
+          "名称": "undionly.kpxe",
+          "必需": true,
+          "来源": "https://boot.ipxe.org/",
+          "许可": "GPL-2.0",
+          "说明": "传统 BIOS 客户端引导"
+        },
+        {
+          "名称": "ipxe.efi",
+          "必需": true,
+          "来源": "https://boot.ipxe.org/",
+          "许可": "GPL-2.0",
+          "说明": "UEFI 客户端引导（64 位）"
+        },
+        {
+          "名称": "snponly.efi",
+          "必需": false,
+          "来源": "https://boot.ipxe.org/",
+          "许可": "GPL-2.0",
+          "说明": "部分网卡固件需要，默认不使用"
+        },
+        {
+          "名称": "bzImage",
+          "必需": true,
+          "来源": "https://github.com/FOGProject/fos （构建）或已安装 FOG 的服务器目录",
+          "许可": "GPL-3.0",
+          "说明": "FOS 内核"
+        },
+        {
+          "名称": "init.xz",
+          "必需": true,
+          "来源": "https://github.com/FOGProject/fos （构建）或已安装 FOG 的服务器目录",
+          "许可": "GPL-3.0",
+          "说明": "FOS initramfs，内含 partclone 与 udp-receiver"
+        }
+      ]
+    },
+    "PXE": {
+      "用途": "DHCP / ProxyDHCP / TFTP 服务",
+      "文件": [
+        {
+          "名称": "pxesrv.exe",
+          "必需": true,
+          "来源": "http://reboot.pro/files/file/303-tiny-pxe-server/",
+          "许可": "免费软件",
+          "说明": "Tiny PXE Server；config.ini 由程序运行时生成，不要手工拷贝"
+        }
+      ]
+    },
+    "NFS": {
+      "用途": "向客户端提供 NFS 共享（镜像目录）",
+      "文件": [
+        {
+          "名称": "nfssrv-64.exe",
+          "必需": true,
+          "来源": "https://www.hanewin.net/nfs-e.htm",
+          "许可": "商业软件（需自行购买授权）",
+          "说明": "haneWIN NFS Server 主程序；nfsd.ini / exports / inodes.nfs 由程序运行时生成"
+        }
+      ]
+    },
+    "tools": {
+      "用途": "多播发送/接收（刻台数 ≥ 2 时使用）",
+      "文件": [
+        {
+          "名称": "udp-sender.exe",
+          "必需": true,
+          "来源": "https://www.udpcast.linux.lu/download",
+          "许可": "GPL-2.0",
+          "说明": "多播发送端"
+        },
+        {
+          "名称": "udp-receiver.exe",
+          "必需": true,
+          "来源": "https://www.udpcast.linux.lu/download",
+          "许可": "GPL-2.0",
+          "说明": "多播接收端（随 FOS 使用，放在此处便于版本一致）"
+        }
+      ]
+    }
+  },
+  "自动生成": [
+    "Images\\  镜像目录（程序首次运行创建）",
+    "config\\  settings.ini / tuning.ini / ipbackup.ini（程序首次运行创建）",
+    "log\\     任务日志与详细日志（程序首次运行创建）"
+  ]
+}
